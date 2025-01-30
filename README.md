@@ -228,12 +228,10 @@ python bot.py
 ## 📞 Поддержка и контакты
 - **Telegram**: [@ctrltg](https://t.me/ctrltg)
 - **Сайт**: [whomever.tech](https://whomever.tech)
-- **Email**: support@whomever.tech
-- **GitHub**: [Issues](https://github.com/your-repo/issues)
+- **Email**: samarkandking@mail.ru
 
 ## 📄 Лицензия
 MIT License - свободное использование с указанием авторства
 
 ## 🔄 Обновления
 Следите за обновлениями на нашем канале: [@Whomevertech](https://t.me/Whomevertech) 
-Контакты - t.me/ctrltg
