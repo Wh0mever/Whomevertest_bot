@@ -1,11 +1,11 @@
 {
-    "API_TOKEN": "7792692284:AAETBW9GWewaXAQwVii1Hz7FtElVge0J6Ro",
-    "API_ID": "25066229",
-    "API_HASH": "32e233c10598dcb48e8135188287ee1f",
-    "OPENAI_API_KEY": "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",
-    "NEWS_API_KEY": "ad82bd4cda7a4947ba28c2dcb89eb0c7",
-    "GOOGLE_SEARCH_API_KEY": "AIzaSyDmqs-fc5YDqgGhqH1ST57xvKeD67kuBHo",
-    "GOOGLE_SEARCH_ENGINE_ID": "45a3a83f326ef44c3",
+    "API_TOKEN": "Your_Token",
+    "API_ID": "Your_Token",
+    "API_HASH": "Your_Token",
+    "OPENAI_API_KEY": "Your_Token",
+    "NEWS_API_KEY": "Your_Token",
+    "GOOGLE_SEARCH_API_KEY": "Your_Token",
+    "GOOGLE_SEARCH_ENGINE_ID": "Your_Token",
     "POST_SETTINGS": {
         "MAX_LENGTH": 500,
         "CHECK_DELAY": 60,
