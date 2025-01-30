@@ -1,0 +1,36 @@
+{
+    "API_TOKEN": "7792692284:AAETBW9GWewaXAQwVii1Hz7FtElVge0J6Ro",
+    "API_ID": "25066229",
+    "API_HASH": "32e233c10598dcb48e8135188287ee1f",
+    "OPENAI_API_KEY": "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",
+    "NEWS_API_KEY": "ad82bd4cda7a4947ba28c2dcb89eb0c7",
+    "GOOGLE_SEARCH_API_KEY": "AIzaSyDmqs-fc5YDqgGhqH1ST57xvKeD67kuBHo",
+    "GOOGLE_SEARCH_ENGINE_ID": "45a3a83f326ef44c3",
+    "POST_SETTINGS": {
+        "MAX_LENGTH": 500,
+        "CHECK_DELAY": 60,
+        "VIEW_NORM_PERCENT": 10.0,
+        "REACTION_NORM_PERCENT": 0.8
+    },
+    "NEWS_SETTINGS": {
+        "MORNING_DEADLINE": 12,
+        "MAX_NEWS_AGE": 6,
+        "URGENT_CATEGORIES": [
+            "военные действия",
+            "важные заявления",
+            "чрезвычайные ситуации"
+        ]
+    },
+    "UPDATE_INTERVALS": {
+        "SUBSCRIBERS": 3600,
+        "POSTS": 300
+    },
+    "NOTIFICATIONS": {
+        "SEND_TO_OWNER": true,
+        "NOTIFY_ON_ERRORS": true,
+        "NOTIFY_ON_LOW_METRICS": true
+    },
+    "CHECK_INTERVAL": 60,
+    "MAX_RETRIES": 3,
+    "TIMEOUT": 30
+}

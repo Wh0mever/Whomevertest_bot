@@ -1,0 +1,57 @@
+{
+    "@lalalgogo": {
+        "timezone": 5.0,
+        "is_news": false,
+        "subscribers": 6,
+        "title": "123123",
+        "posts": [],
+        "chat_id": -1002472997649,
+        "admins": [
+            1914567632
+        ]
+    },
+    "-1002004224282": {
+        "timezone": 3.0,
+        "is_news": true,
+        "subscribers": 1028,
+        "title": "Сертолово · Ленинградская область",
+        "posts": [],
+        "chat_id": -1002004224282,
+        "admins": [
+            380113835
+        ]
+    },
+    "-1002034227467": {
+        "timezone": 3.0,
+        "is_news": true,
+        "subscribers": 1530,
+        "title": "Моя Гатчина · Ленинградская область",
+        "posts": [],
+        "chat_id": -1002034227467,
+        "admins": [
+            380113835
+        ]
+    },
+    "-1002374541033": {
+        "timezone": -2.0,
+        "is_news": true,
+        "subscribers": 4,
+        "title": "Для теста",
+        "posts": [],
+        "chat_id": -1002374541033,
+        "admins": [
+            1914567632
+        ]
+    },
+    "-1002453813682": {
+        "timezone": 3.0,
+        "is_news": true,
+        "subscribers": 7,
+        "title": "Тестовый для контента ТГ Регион",
+        "posts": [],
+        "chat_id": -1002453813682,
+        "admins": [
+            380113835
+        ]
+    }
+}
