@@ -150,7 +150,7 @@ async def check_post_metrics(
     # Устанавливаем минимальные значения
     min_views = max(1, round(subscribers * 0.1))  # Минимум 10% от подписчиков
     min_reactions = max(1, round(views * 0.06))   # Минимум 6% от просмотров
-    min_forwards = max(1, round(views * 0.01))    # Минимум 1% от просмотров
+    min_forwards = max(1, round(views * 0.15))    # Минимум 15% от просмотров
 
     # Проверяем метрики
     if views < min_views:
