@@ -1,9 +1,10 @@
 import json
-import os
+from pathlib import Path
 
-# Загрузка конфигурации из JSON файла
 def load_config():
-    config_path = os.path.join(os.path.dirname(__file__), '..', 'config.json')
+    """Загружает конфигурацию из файла config.json"""
+    config_path = Path("config.json")
+    
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -18,8 +19,7 @@ required_keys = [
     "API_TOKEN",
     "API_ID",
     "API_HASH",
-    "OPENAI_API_KEY",
-    "NEWS_API_KEY"
+    "OPENAI_API_KEY"
 ]
 
 for key in required_keys:

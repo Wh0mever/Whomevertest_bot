@@ -1,14 +1,10 @@
-import re
 import json
 import logging
-import requests
 from openai import OpenAI
 from datetime import datetime, timedelta
-from .api import get_news_by_text, get_gpt_response
-from typing import Dict, Any, List, Tuple
-import aiohttp
-from .config import CONFIG  # Добавляем импорт в начало файла
+from typing import Dict, Any, List
 import asyncio
+from .config import CONFIG
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -143,29 +139,39 @@ async def check_post_metrics(
     message_text: str,
     message_url: str,
     settings: dict = None
-) -> tuple[bool, list[str]]:
+) -> Dict[str, Any]:
     """Проверяет метрики поста на соответствие требованиям канала"""
     issues = []
     
+    # Используем настройки канала, если они есть, иначе берем из общей конфигурации
+    if settings and 'metrics' in settings:
+        min_views_percent = settings['metrics'].get('views_percent', CONFIG['POST_SETTINGS']['MIN_VIEWS_PERCENT'])
+        min_reactions_percent = settings['metrics'].get('reactions_percent', CONFIG['POST_SETTINGS']['MIN_REACTIONS_PERCENT'])
+        min_forwards_percent = settings['metrics'].get('forwards_percent', CONFIG['POST_SETTINGS']['MIN_FORWARDS_PERCENT'])
+    else:
+        min_views_percent = CONFIG['POST_SETTINGS'].get('MIN_VIEWS_PERCENT', 10.0)
+        min_reactions_percent = CONFIG['POST_SETTINGS'].get('MIN_REACTIONS_PERCENT', 6.0)
+        min_forwards_percent = CONFIG['POST_SETTINGS'].get('MIN_FORWARDS_PERCENT', 15.0)
+    
     # Устанавливаем минимальные значения
-    min_views = max(1, round(subscribers * 0.1))  # Минимум 10% от подписчиков
-    min_reactions = max(1, round(views * 0.06))   # Минимум 6% от просмотров
-    min_forwards = max(1, round(views * 0.15))    # Минимум 15% от просмотров
+    min_views = max(1, round(subscribers * (min_views_percent / 100)))  # Минимум X% от подписчиков
+    min_reactions = max(1, round(views * (min_reactions_percent / 100)))   # Минимум Y% от просмотров
+    min_forwards = max(1, round(views * (min_forwards_percent / 100)))    # Минимум Z% от просмотров
 
     # Проверяем метрики
     if views < min_views:
         issues.append(
-            f"Низкое количество просмотров: {views} (минимум {min_views}, 10% от подписчиков)"
+            f"Низкое количество просмотров: {views} (минимум {min_views}, {min_views_percent}% от подписчиков)"
         )
     
     if reactions < min_reactions:
         issues.append(
-            f"Низкое количество реакций: {reactions} (минимум {min_reactions}, 6% от просмотров)"
+            f"Низкое количество реакций: {reactions} (минимум {min_reactions}, {min_reactions_percent}% от просмотров)"
         )
         
     if forwards < min_forwards:
         issues.append(
-            f"Низкое количество пересылок: {forwards} (минимум {min_forwards}, 1% от просмотров)"
+            f"Низкое количество пересылок: {forwards} (минимум {min_forwards}, {min_forwards_percent}% от просмотров)"
         )
     
     # Формируем подробный отчет
@@ -182,180 +188,32 @@ async def check_post_metrics(
             f"Проблемы:\n" + "\n".join(issues)
         )
     
-    return metrics_ok, issues
-
-# Проверка актуальности новости
-async def check_news_actuality_internal(text: str, local_time: datetime, post_time: datetime) -> dict:
-    """
-    Внутренняя функция для проверки актуальности новости.
-    
-    Args:
-        text (str): Текст новости
-        local_time (datetime): Локальное время проверки
-        post_time (datetime): Время публикации
-        
-    Returns:
-        dict: Результат проверки
-    """
-    try:
-        # Получаем новости через News API
-        news_api_response = await get_news_by_text(text)
-        
-        sources = []
-        if news_api_response.get("articles"):
-            sources = [article["url"] for article in news_api_response["articles"][:3]]
-        
-        # Формируем промпт для GPT
-        system_prompt = """Вы - эксперт по анализу новостного контента.
-                        
-                        При анализе учитывайте:
-                        - Для новостей ДО 12:00 допустимы вчерашние события
-                        - После 12:00 - только сегодняшние, кроме срочных
-                        - Для срочных новостей (военные действия, важные заявления) - всегда актуально
-                        - Для остальных - не старше 6 часов
-                        
-                        Если новость старше указанного времени, обязательно укажите примерную дату события."""
-                        
-        user_prompt = f"""Проанализируйте актуальность новости:
-                        Текст: {text}
-                        Локальное время: {local_time.strftime('%H:%M')}
-                        Время публикации: {'после' if post_time.hour >= 12 else 'до'} 12:00
-                        Найденные источники: {sources}
-                        
-                        Верните ответ в формате JSON:
-                        {{
-                            "is_actual": true/false,
-                            "reason": "причина решения с указанием примерной даты события, если новость не актуальна",
-                            "category": "срочная/обычная",
-                            "importance_level": "высокая/средняя/низкая",
-                            "sources": [источники],
-                            "estimated_date": "примерная дата события в формате YYYY-MM-DD",
-                            "days_difference": "разница в днях между событием и текущей датой"
-                        }}"""
-                        
-        # Получаем ответ от GPT
-        gpt_response = await get_gpt_response(system_prompt, user_prompt)
-        
-        # Парсим JSON-ответ
-        result = json.loads(gpt_response)
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Ошибка при проверке актуальности новости: {e}", exc_info=True)
-        return {
-            "is_actual": True,
-            "reason": f"Ошибка при проверке: {str(e)}",
-            "category": "обычная",
-            "importance_level": "средняя",
-            "sources": [],
-            "estimated_date": None,
-            "days_difference": None
-        }
-
-async def check_news_actuality(text: str, date: datetime) -> dict:
-    """
-    Проверяет актуальность новости через несколько источников и анализирует их через GPT
-    
-    Args:
-        text: Текст новости
-        date: Дата публикации
-    """
-    try:
-        # 1. Получаем новости из всех источников
-        news_data = await get_news_by_text(text[:100], days=7)
-        
-        # 2. Анализируем результаты через GPT
-        analysis_prompt = f"""
-        Проанализируйте новость и найденные источники:
-        
-        Новость: {text}
-        Дата публикации: {date.strftime('%Y-%m-%d %H:%M')}
-        
-        Найденные источники:
-        {json.dumps(news_data, ensure_ascii=False, indent=2)}
-        
-        На основе предоставленных источников определите:
-        1. Актуальность новости
-        2. Достоверность информации
-        3. Категорию новости
-        4. Важность события
-        
-        При анализе учитывайте:
-        - Для новостей ДО 12:00 допустимы вчерашние события
-        - После 12:00 - только сегодняшние, кроме срочных
-        - Для срочных новостей (военные действия, важные заявления) - всегда актуально
-        - Для остальных - не старше 6 часов
-        
-        Верните результат в формате JSON:
-        {{
-            "is_actual": bool,          // актуальна ли новость
-            "reason": str,              // причина решения
-            "news_type": str,           // тип новости (срочная/обычная/анонс)
-            "importance_level": str,     // важность (высокая/средняя/низкая)
-            "source_reliability": {{     // надежность источников
-                "total_sources": int,    // общее количество источников
-                "reliable_sources": int, // количество надежных источников
-                "average_score": float   // средний балл надежности
-            }},
-            "time_relevance": {{        // временная релевантность
-                "is_recent": bool,      // новость свежая
-                "hours_ago": int,       // сколько часов прошло
-                "matches_found": int    // сколько совпадений найдено
-            }},
-            "verification": {{          // проверка информации
-                "is_verified": bool,    // информация подтверждена
-                "verification_level": str, // уровень проверки
-                "sources": [str]        // список источников
-            }}
-        }}"""
-        
-        result = await get_gpt_response(
-            system_prompt="""Вы - эксперт по анализу новостного контента.
-            
-            При анализе учитывайте:
-            1. Пересечение информации в разных источниках
-            2. Авторитетность и надежность источников
-            3. Временную релевантность
-            4. Важность и срочность новости
-            
-            Для срочных новостей:
-            - Проверяйте несколько источников
-            - Учитывайте официальные заявления
-            - Оценивайте общественную значимость
-            
-            Для обычных новостей:
-            - Строго следите за временными рамками
-            - Проверяйте актуальность информации
-            - Оценивайте необходимость публикации""",
-            user_prompt=analysis_prompt
-        )
-        
-        return json.loads(result)
-
-    except Exception as e:
-        logger.error(f"Ошибка при проверке актуальности: {e}")
-        return {
-            "is_actual": False,
-            "reason": "Ошибка при проверке",
-            "news_type": "неопределен",
-            "importance_level": "низкая",
-            "source_reliability": {
-                "total_sources": 0,
-                "reliable_sources": 0,
-                "average_score": 0
+    return {
+        "passed": metrics_ok,
+        "details": {
+            "metrics": {
+                "views": {
+                    "current": views,
+                    "required": min_views,
+                    "percent": (views/min_views*100),
+                    "passed": views >= min_views
+                },
+                "reactions": {
+                    "current": reactions,
+                    "required": min_reactions,
+                    "percent": (reactions/min_reactions*100),
+                    "passed": reactions >= min_reactions
+                },
+                "forwards": {
+                    "current": forwards,
+                    "required": min_forwards,
+                    "percent": (forwards/min_forwards*100),
+                    "passed": forwards >= min_forwards
+                }
             },
-            "time_relevance": {
-                "is_recent": False,
-                "hours_ago": 0,
-                "matches_found": 0
-            },
-            "verification": {
-                "is_verified": False,
-                "verification_level": "не проверено",
-                "sources": []
-            }
+            "issues": issues
         }
+    }
 
 async def check_content_moderation(text: str) -> dict:
     """Проверяет контент на наличие ошибок"""

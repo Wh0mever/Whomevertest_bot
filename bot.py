@@ -4,22 +4,22 @@ import asyncio
 import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command
+from aiogram.filters import Command, Text
 from utils.database import load_json, save_json
 from utils.logging import setup_logger
 from utils.checks import (
-    check_text_length, 
-    check_spelling, 
-    check_post_metrics, 
-    check_news_actuality,
-    check_content_moderation
+    check_spelling,
+    check_post_metrics,
+    check_text_length
 )
 from openai import OpenAI
 from telethon import TelegramClient
 from datetime import datetime, timedelta
 import aiohttp
 from utils.api import set_bot_getter
-import time
+from utils.keyboards import get_main_keyboard
+from typing import List, Dict, Any
+from utils.config import CONFIG
 
 # Настройка логирования
 logger = setup_logger()
@@ -27,6 +27,17 @@ logger = setup_logger()
 # Загрузка конфигурации
 with open("config.json") as config_file:
     CONFIG = json.load(config_file)
+
+# Загрузка данных о каналах и истории
+channels = load_json("channels.json", default={})
+history = load_json("history.json", default={})
+
+# Функции для сохранения данных
+def save_channels():
+    save_json("channels.json", channels)
+
+def save_history():
+    save_json("history.json", history)
 
 # В начале файла, где определены константы
 CONFIG.update({
@@ -43,19 +54,17 @@ dp = Dispatcher()
 # Регистрируем бота в диспетчере
 dp.bot = bot
 
-# Загрузка данных о каналах
-channels = load_json("channels.json")
-
 # Глобальная переменная для отслеживания состояния
 waiting_for_channel = False
 
 # Добавляем в начало файла инициализацию клиента Telethon
 client = TelegramClient('bot_session', CONFIG["API_ID"], CONFIG["API_HASH"])
 
-# Функция для сохранения данных
-def save_channels():
-    save_json("channels.json", channels)
+# Загружаем конфигурацию
+ADMIN_IDS = CONFIG.get('ADMIN_IDS', [])
 
+# В начале файла добавим структуру для хранения отложенных проверок
+pending_checks = {}
 
 # Команда /start
 @dp.message(Command("start"))
@@ -63,89 +72,65 @@ async def start_command(message: types.Message):
     try:
         await message.reply(
             "Привет! Я бот для отслеживания каналов.\n"
-            "Используй /help, чтобы узнать, что я умею."
+            "Используй кнопки или команды для управления.",
+            reply_markup=get_main_keyboard()
         )
     except Exception as e:
         logger.error(f"Ошибка в команде /start: {e}")
         await message.reply("Произошла ошибка при обработке вашего запроса.")
 
 
-# Команда /help
+# Команда /help и кнопка FAQ
 @dp.message(Command("help"))
+@dp.message(Text(text="❓ FAQ"))
 async def help_command(message: types.Message):
     try:
         await message.reply(
-            "📋 Список команд:\n\n"
-            "- `/start` - начать работу с ботом\n"
-            "- `/help` - получить помощь\n"
-            "- `/add_channel` - добавить канал для отслеживания\n"
-            "   Примеры:\n"
-            "   `/add_channel @channel +05:00`\n"
-            "   `/add_channel -100123456789 -02:30`\n"
-            "- `/cancel` - отменить текущую операцию\n"
-            "- `/channels` - управление каналами\n"
-            "- `/stats` - статистика по каналам\n\n"
+            "📋 Список команд и возможностей:\n\n"
+            "➕ Добавить канал - добавление нового канала\n"
+            "📋 Список каналов - управление каналами\n"
+            "📊 Статистика - основная статистика\n"
+            "📈 Расширенная Статистика - подробный отчет за 48 часов\n\n"
+            "**Требования к постам:**\n"
+            "1️⃣ Этап проверки контента:\n"
+            "   • Орфография и грамматика\n"
+            "   • Спам и повторы\n"
+            "   • Читабельность текста\n\n"
+            "2️⃣ Этап проверки метрик (через 24 часа):\n"
+            "   • Просмотры: 10% от подписчиков\n"
+            "   • Реакции: 6% от просмотров\n"
+            "   • Пересылки: 15% от просмотров\n\n"
             "**Связь с разработчиком:**\n"
             "Telegram: [t.me/ctrltg](t.me/ctrltg)\n"
             "Сайт: [whomever.tech](https://whomever.tech)",
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Ошибка в команде /help: {e}", exc_info=True)
+        logger.error(f"Ошибка в команде help/FAQ: {e}", exc_info=True)
         await message.reply("Произошла ошибка при обработке вашего запроса.")
 
 
-# Добавление канала
+# Добавление канала (команда и кнопка)
 @dp.message(Command("add_channel"))
+@dp.message(Text(text="➕ Добавить канал"))
 async def add_channel_command(message: types.Message):
+    """Обработчик команды добавления канала"""
     try:
-        # Проверяем, есть ли параметры в команде
-        args = message.text.split(maxsplit=1)
-        if len(args) > 1:
-            # Если есть параметры, пробуем добавить канал сразу
-            await process_channel_with_timezone(message, args[1])
-        else:
-            # Если нет параметров, запускаем стандартный процесс
-            global waiting_for_channel
-            waiting_for_channel = True
-            await message.reply(
-                "Отправьте ID или username канала, который нужно добавить.\n"
-                "Формат: @username +05:00 или -100123456789 -02:30"
-            )
+        global waiting_for_channel
+        waiting_for_channel = True
+        await message.reply(
+            "Отправьте ID или username канала, который нужно добавить.\n"
+            "Формат: @username +05:00 или -100123456789 -02:30\n\n"
+            "Для отмены используйте команду /cancel"
+        )
     except Exception as e:
         logger.error(f"Ошибка при добавлении канала: {e}", exc_info=True)
         await message.reply("Произошла ошибка при добавлении канала.")
 
-async def process_channel_with_timezone(message: types.Message, channel_id: str, timezone: float):
-    """Обрабатывает добавление канала с часовым поясом"""
-    try:
-        # Получаем информацию о канале
-        chat = await bot.get_chat(channel_id)
-        chat_info = await bot.get_chat_member_count(channel_id)
-        
-        # Конвертируем в int для форматирования
-        subscribers = int(chat_info)
-        
-        # Формируем сообщение с информацией о канале
-        channel_info = (
-            f"ℹ️ Информация о канале:\n"
-            f"📌 Название: {chat.title}\n"
-            f"👥 Подписчиков: {subscribers:,}\n"
-            f"🕒 Часовой пояс: {timezone:+.2f}"
-        )
-        
-        await message.reply(channel_info)
 
-    except Exception as e:
-        logger.error(f"Ошибка при получении информации о канале {channel_id}: {e}")
-        await message.reply("Не удалось получить информацию о канале. Убедитесь, что:\n"
-                          "1. Бот добавлен в канал как администратор\n"
-                          "2. У бота есть права на просмотр статистики канала\n"
-                          "3. Канал существует и доступен")
-
-
-# Перемещаем обработчик команды /channels перед общим обработчиком
+# Список каналов (команда и кнопка)
 @dp.message(Command("channels"))
+@dp.message(Text(text="📋 Список каналов"))
 async def list_channels(message: types.Message):
     try:
         if not channels:
@@ -153,7 +138,6 @@ async def list_channels(message: types.Message):
             return
 
         text = "Список отслеживаемых каналов:\n\n"
-        # Создаем список кнопок правильным способом для aiogram 3.x
         buttons = [[InlineKeyboardButton(
                     text=channel_id,
                     callback_data=f"manage_channel:{channel_id}"
@@ -175,14 +159,22 @@ async def manage_channel(callback_query: types.CallbackQuery):
         channel_id = callback_query.data.split(":")[1]
         channel_data = channels[channel_id]
 
-        # Создаем клавиатуру правильным способом
+        # Получаем текущие настройки метрик
+        metrics = channel_data.get('metrics', {
+            'views_percent': CONFIG['POST_SETTINGS']['MIN_VIEWS_PERCENT'],
+            'reactions_percent': CONFIG['POST_SETTINGS']['MIN_REACTIONS_PERCENT'],
+            'forwards_percent': CONFIG['POST_SETTINGS']['MIN_FORWARDS_PERCENT']
+        })
+
+        # Создаем клавиатуру
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Удалить канал", callback_data=f"delete:{channel_id}")],
             [InlineKeyboardButton(text="🕒 Изменить часовой пояс", callback_data=f"timezone:{channel_id}")],
             [InlineKeyboardButton(
                 text=f"📰 Новостной канал: {'✅' if channel_data['is_news'] else '❌'}",
-            callback_data=f"toggle_news:{channel_id}"
-            )]
+                callback_data=f"toggle_news:{channel_id}"
+            )],
+            [InlineKeyboardButton(text="📊 Настройки метрик", callback_data=f"metrics_settings:{channel_id}")]
         ])
 
         await callback_query.message.edit_text(
@@ -190,7 +182,11 @@ async def manage_channel(callback_query: types.CallbackQuery):
             f"📑 Название: {channel_data.get('title', 'Неизвестно')}\n"
             f"🕒 Часовой пояс: {channel_data['timezone']:+.2f}\n"
             f"📰 Новостной канал: {'Да' if channel_data['is_news'] else 'Нет'}\n"
-            f"👥 Подписчиков: {channel_data['subscribers']:,}",
+            f"👥 Подписчиков: {channel_data['subscribers']:,}\n\n"
+            f"📊 Настройки метрик:\n"
+            f"👁 Просмотры: {metrics['views_percent']}% от подписчиков\n"
+            f"👍 Реакции: {metrics['reactions_percent']}% от просмотров\n"
+            f"↗️ Пересылки: {metrics['forwards_percent']}% от просмотров",
             reply_markup=keyboard
         )
         logger.info(f"Меню управления каналом {channel_id} отображено")
@@ -272,10 +268,10 @@ async def toggle_news_status(callback_query: types.CallbackQuery):
         await callback_query.message.reply("Произошла ошибка при изменении статуса канала.")
 
 
-# Статистика по каналам
+# Статистика (команда и кнопка)
 @dp.message(Command("stats"))
+@dp.message(Text(text="📊 Статистика"))
 async def stats_command(message: types.Message):
-    """Показывает статистику каналов"""
     try:
         stats_text = "📊 Статистика каналов:\n\n"
         for chat_id, data in channels.items():
@@ -283,13 +279,63 @@ async def stats_command(message: types.Message):
             stats_text += (
                 f"📌 {channel_info.title}\n"
                 f"👥 Подписчиков: {data.get('subscribers', 0):,}\n"
-                f"🕒 Часовой пояс: {data.get('timezone', 0):+.2f}\n"
-                f"📰 Новостной: {'✅' if data.get('is_news', False) else '❌'}\n\n"
+                f"🕒 Часовой пояс: {data.get('timezone', 0):+.2f}\n\n"
             )
         await message.reply(stats_text)
     except Exception as e:
         logger.error(f"Ошибка при выводе статистики: {e}")
         await message.reply("Ошибка при получении статистики")
+
+
+# Расширенная статистика (команда и кнопка)
+@dp.message(Command("allstats"))
+@dp.message(Text(text="📈 Расширенная Статистика"))
+async def extended_stats_command(message: types.Message):
+    try:
+        stats_text = "📈 Расширенная статистика за 48 часов:\n\n"
+        
+        for chat_id, data in channels.items():
+            try:
+                channel_info = await bot.get_chat(chat_id)
+                stats_text += f"📌 {channel_info.title}\n"
+                stats_text += f"👥 Подписчиков: {data.get('subscribers', 0):,}\n\n"
+                
+                # Получаем статистику из истории
+                channel_posts = {k: v for k, v in history.items() 
+                               if k.startswith(f"{chat_id}_") and 
+                               (datetime.now() - datetime.fromisoformat(v['date'])).total_seconds() <= 48*3600}
+                
+                total_posts = len(channel_posts)
+                failed_content = len([k for k, v in channel_posts.items() 
+                                    if v.get("has_errors", False)])
+                failed_metrics = len([k for k, v in channel_posts.items() 
+                                    if v.get("metrics_failed", False)])
+                
+                stats_text += "🔍 Проверки контента:\n"
+                stats_text += f"• Всего постов: {total_posts}\n"
+                stats_text += f"• Не прошли проверку: {failed_content}\n"
+                content_success_rate = ((total_posts - failed_content) / total_posts * 100 
+                                      if total_posts > 0 else 0)
+                stats_text += f"• Процент успеха: {content_success_rate:.1f}%\n\n"
+                
+                stats_text += "📊 Проверки метрик:\n"
+                stats_text += f"• Всего проверок: {total_posts}\n"
+                stats_text += f"• Не прошли проверку: {failed_metrics}\n"
+                metrics_success_rate = ((total_posts - failed_metrics) / total_posts * 100 
+                                      if total_posts > 0 else 0)
+                stats_text += f"• Процент успеха: {metrics_success_rate:.1f}%\n\n"
+                
+                stats_text += "➖➖➖➖➖➖➖➖➖➖\n\n"
+                
+            except Exception as e:
+                logger.error(f"Ошибка при получении статистики канала {chat_id}: {e}")
+                continue
+        
+        await message.reply(stats_text)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выводе расширенной статистики: {e}")
+        await message.reply("Ошибка при получении расширенной статистики")
 
 
 # Запуск бота
@@ -309,14 +355,48 @@ async def update_subscribers_count():
             logger.error(f"Ошибка при обновлении подписчиков: {e}")
         await asyncio.sleep(CONFIG["UPDATE_INTERVALS"]["SUBSCRIBERS"])  # Используйте значение из конфигурации
 
-# Обновляем функцию main
+# Добавим функцию для периодической проверки
+async def check_pending_metrics_periodically():
+    """Периодически проверяет отложенные метрики"""
+    while True:
+        try:
+            results = await check_pending_metrics()
+            
+            # Если есть результаты, отправляем их админам
+            if results and ADMIN_IDS:
+                for admin_id in ADMIN_IDS:
+                    try:
+                        # Отправляем общую статистику
+                        summary = (
+                            f"📊 Результаты автоматической проверки метрик:\n\n"
+                            f"Проверено постов с недостаточными метриками: {len(results)}\n\n"
+                        )
+                        await bot.send_message(admin_id, summary)
+                        
+                        # Отправляем детальные результаты
+                        for result in results:
+                            await bot.send_message(admin_id, result['message'])
+                            
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки результатов админу {admin_id}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Ошибка при периодической проверке метрик: {e}")
+            
+        # Ждем 5 минут перед следующей проверкой
+        await asyncio.sleep(300)
+
+# Обновим функцию main
 async def main():
     await client.start()  # Вход в систему
     logger.info("Клиент Telethon подключен.")
     print("Бот запущен...")
-    # Запускаем задачу обновления подписчиков
+    
+    # Запускаем фоновые задачи
     asyncio.create_task(update_subscribers_count())
-    # Запускаем бота и диспетчер
+    asyncio.create_task(check_pending_metrics_periodically())
+    
+    # Запускаем бота
     await dp.start_polling(bot)
 
 
@@ -333,128 +413,74 @@ async def cancel_command(message: types.Message):
 # Обработчик для новых постов в каналах
 @dp.channel_post()
 async def handle_channel_post(message: types.Message):
-    """Обрабатывает новые посты в каналах"""
+    """Обработчик новых постов в каналах"""
     try:
         chat_id = str(message.chat.id)
-        logger.info(f"Получен новый пост из канала {message.chat.title or chat_id}")
-        
-        # Ищем канал по chat_id
-        channel_data = None
-        for channel_id, data in channels.items():
-            if str(data.get('chat_id')) == chat_id:
-                channel_data = data
-                break
-                
-        if not channel_data:
-            logger.error(f"Канал {chat_id} не найден в базе")
+        if chat_id not in channels:
             return
+
+        # Получаем информацию о канале
+        channel_info = await bot.get_chat(chat_id)
+        subscribers = channels[chat_id].get('subscribers', 0)
+        
+        # Проверяем длину текста
+        if message.text and len(message.text) > 500:
+            logger.warning(f"Пост в канале {chat_id} превышает 500 символов!\n"
+                         f"Длина текста: {len(message.text)} символов")
             
-        # Проверяем текст через OpenAI
+        # Проверяем контент на ошибки
+        has_errors = False
         if message.text:
-            logger.info("Этап 1: Проверка контента")
-            content_check = await check_content_moderation(message.text)
-            logger.info(f"Результат проверки контента: {content_check}")
+            spelling_result = await check_spelling(message.text, CONFIG["OPENAI_API_KEY"])
+            has_errors = spelling_result.get("has_errors", False)
             
-            if content_check.get("has_errors", False):
-                logger.info(f"Этап 1: Найдены проблемы в контенте")
+            if has_errors:
+                logger.info(f"Результат проверки контента: {spelling_result}")
+                logger.info("Этап 1: Найдены проблемы в контенте")
                 
-                # Формируем подробное описание проблем
-                error_details = "Найдены следующие проблемы:\n\n"
-                
-                if content_check.get("categories", {}).get("spelling"):
-                    error_details += "📝 Орфографические ошибки:\n"
-                    error_details += content_check.get("details", {}).get("spelling_details", "Не указано") + "\n\n"
+                # Отправляем уведомление админам
+                admin_ids = CONFIG.get("ADMIN_IDS", [])
+                if admin_ids:
+                    logger.info(f"Отправка уведомлений админам: {admin_ids}")
                     
-                if content_check.get("categories", {}).get("grammar"):
-                    error_details += "📚 Грамматические ошибки:\n"
-                    error_details += content_check.get("details", {}).get("grammar_details", "Не указано") + "\n\n"
-                    
-                if content_check.get("categories", {}).get("spam"):
-                    error_details += "🔄 Повторы в тексте:\n"
-                    error_details += content_check.get("details", {}).get("spam_details", "Не указано") + "\n\n"
-                
-                readability = content_check.get("categories", {}).get("readability", {})
-                error_details += f"📊 Читабельность текста:\n"
-                error_details += f"Оценка: {readability.get('score', 0)}/10\n"
-                error_details += f"Уровень: {readability.get('level', 'не определен')}\n"
-                error_details += content_check.get("details", {}).get("readability_details", "Не указано")
-                
-                await notify_admins(
-                    channel_data,
-                    message,
-                    error_type="Проблемы с контентом",
-                    error_details=error_details
-                )
-                return
-            logger.info("Этап 1: Проверка контента успешна")
-            
-            # Проверяем актуальность новости
-            if channel_data.get("is_news", False):
-                logger.info("Этап 2: Проверка актуальности новости")
-                
-                # Получаем дату поста с учетом часового пояса канала
-                timezone_offset = channel_data.get('timezone', 0)
-                post_date = message.date + timedelta(hours=timezone_offset)
-                
-                actuality_check = await check_news_actuality(message.text, post_date)
-                if not actuality_check.get("is_actual", False):
-                    logger.info("Этап 2: Новость неактуальна")
-                    
-                    # Формируем подробное описание проблемы
-                    error_details = (
-                        f"📅 Время публикации: {post_date.strftime('%H:%M')} (UTC{timezone_offset:+.2f})\n"
-                        f"🕒 Локальное время: {datetime.now().strftime('%H:%M')}\n"
-                        f"📌 Категория: {actuality_check.get('news_type', 'не определена')}\n"
-                        f"❗️ Важность: {actuality_check.get('importance_level', 'не определена')}\n\n"
-                        f"❌ Причина: {actuality_check.get('reason', 'Не указана')}\n\n"
-                        f"📊 Анализ источников:\n"
-                        f"• Всего источников: {actuality_check.get('source_reliability', {}).get('total_sources', 0)}\n"
-                        f"• Надежных источников: {actuality_check.get('source_reliability', {}).get('reliable_sources', 0)}\n"
-                        f"• Средняя надежность: {actuality_check.get('source_reliability', {}).get('average_score', 0):.1f}/10\n\n"
-                        f"⏰ Временная релевантность:\n"
-                        f"• Свежесть: {'✅ Свежая' if actuality_check.get('time_relevance', {}).get('is_recent', False) else '❌ Устаревшая'}\n"
-                        f"• Возраст: {actuality_check.get('time_relevance', {}).get('hours_ago', 0)} часов\n"
-                        f"• Найдено упоминаний: {actuality_check.get('time_relevance', {}).get('matches_found', 0)}\n\n"
-                        f"🔍 Проверка информации:\n"
-                        f"• Статус: {'✅ Подтверждено' if actuality_check.get('verification', {}).get('is_verified', False) else '❌ Не подтверждено'}\n"
-                        f"• Уровень проверки: {actuality_check.get('verification', {}).get('verification_level', 'не определен')}\n\n"
-                        f"📰 Подтверждающие источники:\n"
+                    message_text = (
+                        f"📢 Проблемы с контентом\n\n"
+                        f"Канал: {chat_id}\n"
+                        f"Пост: {message.message_id}\n\n"
+                        f"Подробности: {spelling_result['errors']}"
                     )
                     
-                    # Добавляем список источников с кликабельными ссылками
-                    sources = actuality_check.get('verification', {}).get('sources', [])
-                    if sources:
-                        for source in sources:
-                            if isinstance(source, dict):
-                                title = source.get('title', 'Без названия')
-                                url = source.get('url', '')
-                                source_name = source.get('source', '').split(': ')[-1]
-                                reliability = source.get('reliability_score', 0)
-                                if url:
-                                    error_details += f"• [{title}]({url})\n  📍 {source_name} (надежность: {reliability}/10)\n"
-                            elif isinstance(source, str) and 'http' in source:
-                                error_details += f"• [Источник]({source})\n"
-                            else:
-                                error_details += f"• {source}\n"
-                    else:
-                        error_details += "Источники не найдены\n"
+                    for admin_id in admin_ids:
+                        try:
+                            await bot.send_message(admin_id, message_text)
+                        except Exception as e:
+                            logger.error(f"Ошибка при отправке уведомления админу {admin_id}: {e}")
+                else:
+                    logger.warning("Список админов пуст, уведомления не отправлены")
                     
-                    error_details += f"\n📋 Правило: {'допускаются вчерашние новости' if post_date.hour < 12 else 'новости должны быть сегодняшними'}"
-                    
-                    await notify_admins(
-                        channel_data,
-                        message,
-                        error_type="Неактуальная новость",
-                        error_details=error_details,
-                        parse_mode="Markdown"  # Добавляем поддержку Markdown для ссылок
-                    )
-                    return
-                logger.info("Этап 2: Проверка актуальности успешна")
-            
-            # Запускаем отложенную проверку метрик
-            logger.info("Этап 3: Запуск отложенной проверки метрик")
-            asyncio.create_task(check_post_metrics_later(chat_id, message.message_id))
-            
+        # Сохраняем пост для последующей проверки метрик
+        post_data = {
+            'message_id': message.message_id,
+            'chat_id': chat_id,
+            'text': message.text if message.text else '',
+            'date': datetime.now().isoformat(),
+            'url': f"https://t.me/c/{str(chat_id)[4:]}/{message.message_id}",
+            'subscribers': subscribers,
+            'has_errors': has_errors
+        }
+        
+        history[f"{chat_id}_{message.message_id}"] = post_data
+        save_history()
+        
+        # Планируем проверку метрик через 24 часа
+        asyncio.create_task(
+            check_post_metrics_later(
+                chat_id=chat_id,
+                message_id=message.message_id,
+                delay_seconds=CONFIG["POST_SETTINGS"]["METRICS_CHECK_DELAY"]
+            )
+        )
+        
     except Exception as e:
         logger.error(f"Ошибка при обработке поста: {e}", exc_info=True)
 
@@ -463,6 +489,8 @@ async def handle_channel_post(message: types.Message):
 async def process_channel_addition(message: types.Message):
     """Обрабатывает добавление канала"""
     try:
+        global waiting_for_channel
+        
         # Разбираем входные данные
         parts = message.text.split()
         if len(parts) < 1:
@@ -498,8 +526,34 @@ async def process_channel_addition(message: types.Message):
             return
 
         # Получаем информацию о канале
-        chat = await bot.get_chat(channel_id)
-        chat_info = await bot.get_chat_member_count(channel_id)
+        try:
+            chat = await bot.get_chat(channel_id)
+            chat_info = await bot.get_chat_member_count(channel_id)
+            
+            # Проверяем права бота в канале
+            bot_member = await bot.get_chat_member(chat.id, bot.id)
+            if not bot_member.can_read_messages:
+                await message.reply(
+                    "❌ У бота нет прав для чтения сообщений в этом канале.\n"
+                    "Пожалуйста, добавьте бота в администраторы канала с правами:\n"
+                    "- Чтение сообщений\n"
+                    "- Просмотр статистики"
+                )
+                return
+                
+        except Exception as e:
+            await message.reply(
+                "❌ Не удалось получить информацию о канале.\n"
+                "Возможные причины:\n"
+                "1. Канал не существует\n"
+                "2. Бот не добавлен в канал\n"
+                "3. У бота нет необходимых прав\n\n"
+                "Убедитесь, что:\n"
+                "- Канал существует\n"
+                "- Бот добавлен в канал как администратор\n"
+                "- У бота есть права на чтение сообщений и просмотр статистики"
+            )
+            return
         
         # Конвертируем в int для форматирования
         subscribers = int(chat_info)
@@ -527,10 +581,22 @@ async def process_channel_addition(message: types.Message):
         
         await message.reply(channel_info)
         logger.info(f"Канал {channel_id} добавлен с часовым поясом {timezone}, подписчиков: {subscribers}")
+        
+        # Сбрасываем состояние ожидания
+        waiting_for_channel = False
 
     except Exception as e:
         logger.error(f"Ошибка при добавлении канала: {e}", exc_info=True)
-        await message.reply("Произошла ошибка при добавлении канала.")
+        await message.reply(
+            "❌ Произошла ошибка при добавлении канала.\n"
+            "Пожалуйста, проверьте:\n"
+            "1. Правильность введенного ID/username канала\n"
+            "2. Наличие бота в канале\n"
+            "3. Права бота в канале"
+        )
+    finally:
+        # Сбрасываем состояние ожидания даже в случае ошибки
+        waiting_for_channel = False
 
 
 async def get_post_metrics(chat_id: str, message_id: int) -> dict:
@@ -556,6 +622,9 @@ async def get_post_metrics(chat_id: str, message_id: int) -> dict:
         except ValueError as e:
             logger.error(f"Ошибка при получении сущности канала: {e}")
             return None
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при получении канала: {e}")
+            return None
 
         # Получаем сообщение
         try:
@@ -568,29 +637,39 @@ async def get_post_metrics(chat_id: str, message_id: int) -> dict:
             logger.error(f"Ошибка при получении сообщения: {e}")
             return None
 
-        # Собираем все возможные метрики
+        # Инициализируем метрики с безопасными значениями по умолчанию
         metrics = {
-            'views': getattr(message, 'views', 0),
+            'views': getattr(message, 'views', 0) or 0,
             'reactions': 0,
-            'forwards': getattr(message, 'forwards', 0),
+            'forwards': getattr(message, 'forwards', 0) or 0,
             'replies': getattr(message, 'replies', 0) if hasattr(message, 'replies') else 0,
             'post_author': getattr(message, 'post_author', None),
             'date': message.date.isoformat() if hasattr(message, 'date') else None,
         }
 
-        # Получаем реакции
-        if hasattr(message, 'reactions') and message.reactions:
-            reactions_data = []
-            total_reactions = 0
-            for reaction in message.reactions.results:
-                reaction_count = reaction.count
-                total_reactions += reaction_count
-                reactions_data.append({
-                    'emoji': str(reaction.reaction),
-                    'count': reaction_count
-                })
-            metrics['reactions'] = total_reactions
-            metrics['reactions_details'] = reactions_data
+        # Безопасное получение реакций
+        try:
+            if hasattr(message, 'reactions') and message.reactions:
+                reactions_data = []
+                total_reactions = 0
+                if hasattr(message.reactions, 'results'):
+                    for reaction in message.reactions.results:
+                        try:
+                            reaction_count = getattr(reaction, 'count', 0) or 0
+                            total_reactions += reaction_count
+                            reactions_data.append({
+                                'emoji': str(getattr(reaction, 'reaction', '?')),
+                                'count': reaction_count
+                            })
+                        except Exception as e:
+                            logger.error(f"Ошибка при обработке реакции: {e}")
+                            continue
+                    
+                metrics['reactions'] = total_reactions
+                metrics['reactions_details'] = reactions_data
+        except Exception as e:
+            logger.error(f"Ошибка при получении реакций: {e}")
+            # Оставляем значения по умолчанию
             
         logger.info(f"Собраны метрики для поста {message_id}:")
         logger.info(f"- Просмотры: {metrics['views']}")
@@ -608,107 +687,212 @@ async def get_post_metrics(chat_id: str, message_id: int) -> dict:
         logger.error(f"Ошибка при получении метрик поста {message_id} из канала {chat_id}: {e}", exc_info=True)
         return None
 
-async def check_post_metrics_later(chat_id: str, message_id: int):
-    """Проверяет метрики поста через некоторое время"""
+async def check_post_metrics_later(
+    chat_id: str,
+    message_id: int,
+    delay_seconds: int
+):
+    """Добавляет пост в очередь на проверку метрик"""
     try:
-        logger.info(f"Запуск отложенной проверки метрик для поста {message_id} в канале {chat_id}")
-        
-        # Ищем канал по chat_id
-        channel_info = None
-        for channel_id, data in channels.items():
-            if str(data.get('chat_id')) == chat_id:
-                channel_info = data
-                logger.info(f"Найден канал: {data.get('title')} (id: {chat_id})")
-                break
-        
-        if channel_info is None:
+        # Проверяем существование канала
+        if chat_id not in channels:
             logger.error(f"Канал {chat_id} не найден в конфигурации")
             return
-        
-        subscribers_count = channel_info.get('subscribers', 0)
-        
-        logger.info(f"Требования к метрикам:")
-        logger.info(f"- Подписчиков: {subscribers_count}")
-        logger.info(f"- Требуемые просмотры: {max(1, round(subscribers_count * 0.1))} (10% от подписчиков)")
 
-        # Ждем указанное время перед проверкой метрик
-        logger.info("Ожидание 60 секунд перед проверкой метрик...")
-        await asyncio.sleep(60)
+        check_time = datetime.now() + timedelta(seconds=delay_seconds)
         
-        # Получаем актуальные метрики через Telethon
-        logger.info("Получение метрик...")
-        metrics = await get_post_metrics(chat_id, message_id)
+        # Инициализируем структуру для канала, если её нет
+        if chat_id not in pending_checks:
+            pending_checks[chat_id] = {}
         
-        if metrics:
-            views = metrics.get('views', 0)
-            reactions = metrics.get('reactions', 0)
-            forwards = metrics.get('forwards', 0)
-            
-            # Рассчитываем требуемые значения
-            required_views = max(1, round(subscribers_count * 0.1))
-            required_reactions = max(1, round(views * 0.06))
-            required_forwards = max(1, round(views * 0.01))
-            
-            logger.info(f"Текущие метрики:")
-            logger.info(f"- Просмотры: {views}/{required_views} ({views/required_views*100:.1f}%)")
-            logger.info(f"- Реакции: {reactions}/{required_reactions} ({reactions/required_reactions*100:.1f}%)")
-            logger.info(f"- Пересылки: {forwards}/{required_forwards} ({forwards/required_forwards*100:.1f}%)")
-
-            # Проверяем метрики
-            metrics_ok, issues = await check_post_metrics(
-                views=views,
-                reactions=reactions,
-                forwards=forwards,
-                subscribers=subscribers_count,
-                channel_name=channel_info.get('title', chat_id),
-                message_id=message_id,
-                message_text="",  # Не используется в проверке метрик
-                message_url=f"https://t.me/c/{str(chat_id)[4:]}/{message_id}"
-            )
-            
-            if not metrics_ok:
-                logger.warning("Метрики не соответствуют требованиям!")
-                
-                # Проверяем каждую метрику
-                views_ok = views >= required_views
-                reactions_ok = reactions >= required_reactions
-                forwards_ok = forwards >= required_forwards
-                
-                message = (
-                    f"⚠️ Недостаточная активность в посте!\n\n"
-                    f"Канал: {channel_info.get('title', chat_id)}\n"
-                    f"ID поста: {message_id}\n\n"
-                    f"📊 Текущие метрики:\n"
-                    f"👁 Просмотры: {views}/{required_views} ({views/required_views*100:.1f}%) {('✅' if views_ok else '❌')}\n"
-                    f"👍 Реакции: {reactions}/{required_reactions} ({reactions/required_reactions*100:.1f}%) {('✅' if reactions_ok else '❌')}\n"
-                    f"↗️ Пересылки: {forwards}/{required_forwards} ({forwards/required_forwards*100:.1f}%) {('✅' if forwards_ok else '❌')}\n"
-                    f"💬 Ответы: {metrics.get('replies', 0)}\n\n"
-                )
-                
-                # Добавляем список проблем
-                if not metrics_ok:
-                    message += "❗️ Проблемы:\n"
-                    if not views_ok:
-                        message += f"• Низкие просмотры: {views} из {required_views} (норма: 10% от подписчиков)\n"
-                    if not reactions_ok:
-                        message += f"• Низкие реакции: {reactions} из {required_reactions} (норма: 6% от просмотров)\n"
-                    if not forwards_ok:
-                        message += f"• Низкие пересылки: {forwards} из {required_forwards} (норма: 1% от просмотров)\n"
-                    message += "\n"
-                
-                message += f"🔗 Ссылка: https://t.me/c/{str(chat_id)[4:]}/{message_id}"
-                
-                if metrics.get('reactions_details'):
-                    message += "\n\n📝 Детали реакций:\n"
-                    for reaction in metrics['reactions_details']:
-                        message += f"{reaction['emoji']}: {reaction['count']}\n"
-                
-                await notify_admins(channel_info, message)
-            else:
-                logger.info("Метрики соответствуют требованиям")
-
+        # Проверяем, не существует ли уже проверка для этого поста
+        if message_id in pending_checks[chat_id]:
+            logger.warning(f"Проверка для поста {message_id} в канале {chat_id} уже запланирована")
+            return
+        
+        # Сохраняем информацию о посте
+        pending_checks[chat_id][message_id] = {
+            'check_time': check_time,
+            'added_time': datetime.now(),
+            'retries': 0  # Добавляем счетчик попыток
+        }
+        
+        logger.info(f"Пост {message_id} из канала {chat_id} добавлен в очередь на проверку метрик")
+        logger.info(f"Запланированное время проверки: {check_time}")
+        
     except Exception as e:
-        logger.error(f"Ошибка при проверке метрик: {e}", exc_info=True)
+        logger.error(f"Ошибка при планировании проверки метрик для поста {message_id} в канале {chat_id}: {e}")
+
+# Добавим функцию для проверки отложенных метрик
+async def check_pending_metrics(force: bool = False) -> List[Dict[str, Any]]:
+    """Проверяет все отложенные метрики"""
+    results = []
+    current_time = datetime.now()
+    
+    try:
+        for chat_id in list(pending_checks.keys()):
+            if chat_id not in channels:
+                logger.error(f"Канал {chat_id} не найден в конфигурации, пропускаем проверки")
+                continue
+                
+            for message_id in list(pending_checks[chat_id].keys()):
+                try:
+                    check_data = pending_checks[chat_id][message_id]
+                    
+                    # Проверяем количество попыток
+                    if check_data.get('retries', 0) >= 3:
+                        logger.warning(f"Превышено количество попыток для поста {message_id} в канале {chat_id}")
+                        del pending_checks[chat_id][message_id]
+                        continue
+                    
+                    # Проверяем, пришло ли время для проверки или это принудительная проверка
+                    if not force and current_time < check_data['check_time']:
+                        continue
+                        
+                    # Получаем информацию о канале
+                    try:
+                        channel_info = await bot.get_chat(chat_id)
+                        subscribers = channels[chat_id].get('subscribers', 0)
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении информации о канале {chat_id}: {e}")
+                        check_data['retries'] = check_data.get('retries', 0) + 1
+                        continue
+                    
+                    # Получаем актуальные метрики
+                    metrics = await get_post_metrics(chat_id, message_id)
+                    if not metrics:
+                        logger.error(f"Не удалось получить метрики для поста {message_id} из канала {chat_id}")
+                        check_data['retries'] = check_data.get('retries', 0) + 1
+                        continue
+                    
+                    # Получаем данные поста из истории
+                    post_key = f"{chat_id}_{message_id}"
+                    if post_key not in history:
+                        logger.error(f"Пост {post_key} не найден в истории")
+                        del pending_checks[chat_id][message_id]
+                        continue
+                    
+                    post_data = history[post_key]
+                    
+                    try:
+                        # Запускаем проверку метрик
+                        metrics_result = await check_post_metrics(
+                            views=metrics['views'],
+                            reactions=metrics['reactions'],
+                            forwards=metrics['forwards'],
+                            subscribers=subscribers,
+                            channel_name=channel_info.title,
+                            message_id=message_id,
+                            message_text=post_data.get('text', ''),
+                            message_url=post_data.get('url', ''),
+                            settings=channels[chat_id]
+                        )
+                        
+                        # Обновляем историю
+                        post_data.update({
+                            'metrics': metrics,
+                            'metrics_check_time': current_time.isoformat(),
+                            'metrics_passed': metrics_result["passed"],
+                            'metrics_details': metrics_result["details"],
+                            'metrics_failed': not metrics_result["passed"]
+                        })
+                        history[post_key] = post_data
+                        save_history()
+                        
+                        if not metrics_result["passed"]:
+                            metrics_details = metrics_result["details"]["metrics"]
+                            result_message = (
+                                f"⚠️ Недостаточная активность в посте!\n\n"
+                                f"Канал: {channel_info.title}\n"
+                                f"🔗 {post_data['url']}\n\n"
+                                f"📊 Текущие метрики:\n"
+                                f"👁 Просмотры: {metrics_details['views']['current']}/{metrics_details['views']['required']} "
+                                f"({metrics_details['views']['percent']:.1f}%) "
+                                f"{'✅' if metrics_details['views']['passed'] else '❌'}\n"
+                                
+                                f"👍 Реакции: {metrics_details['reactions']['current']}/{metrics_details['reactions']['required']} "
+                                f"({metrics_details['reactions']['percent']:.1f}%) "
+                                f"{'✅' if metrics_details['reactions']['passed'] else '❌'}\n"
+                                
+                                f"↗️ Пересылки: {metrics_details['forwards']['current']}/{metrics_details['forwards']['required']} "
+                                f"({metrics_details['forwards']['percent']:.1f}%) "
+                                f"{'✅' if metrics_details['forwards']['passed'] else '❌'}\n"
+                            )
+                            
+                            if metrics_result["details"]["issues"]:
+                                result_message += "\n❗️ Проблемы:\n"
+                                for issue in metrics_result["details"]["issues"]:
+                                    result_message += f"• {issue}\n"
+                                    
+                            results.append({
+                                'channel_name': channel_info.title,
+                                'message': result_message
+                            })
+                        
+                        # Удаляем проверенный пост из очереди
+                        del pending_checks[chat_id][message_id]
+                        
+                    except Exception as e:
+                        logger.error(f"Ошибка при проверке метрик поста {message_id}: {e}")
+                        check_data['retries'] = check_data.get('retries', 0) + 1
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке поста {message_id}: {e}")
+                    continue
+                    
+            # Очищаем пустые каналы
+            if not pending_checks[chat_id]:
+                del pending_checks[chat_id]
+                
+    except Exception as e:
+        logger.error(f"Ошибка при проверке отложенных метрик: {e}")
+        
+    return results
+
+# Добавим команду и обработчик для проверки отложенных метрик
+@dp.message(Command("check_pending"))
+@dp.message(Text(text="📬 Проверить отложенные"))
+async def check_pending_command(message: types.Message):
+    """Проверяет все отложенные метрики"""
+    try:
+        # Получаем количество отложенных проверок
+        total_pending = sum(len(posts) for posts in pending_checks.values())
+        
+        if total_pending == 0:
+            await message.reply("📭 Нет отложенных проверок метрик.")
+            return
+            
+        # Отправляем начальное сообщение
+        status_message = await message.reply(
+            f"🔄 Начинаю проверку {total_pending} отложенных постов...\n"
+            "Это может занять некоторое время."
+        )
+        
+        # Запускаем проверку
+        results = await check_pending_metrics(force=True)
+        
+        if not results:
+            await status_message.edit_text(
+                f"✅ Проверка завершена!\n"
+                f"Все {total_pending} постов соответствуют требованиям."
+            )
+            return
+            
+        # Отправляем результаты проверки
+        summary = f"📊 Результаты проверки:\n\n"
+        summary += f"Всего проверено: {total_pending}\n"
+        summary += f"Не соответствуют требованиям: {len(results)}\n\n"
+        
+        await status_message.edit_text(summary)
+        
+        # Отправляем детальные результаты для каждого поста
+        for result in results:
+            await message.reply(result['message'])
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке отложенных метрик: {e}")
+        await message.reply("❌ Произошла ошибка при проверке отложенных метрик.")
 
 async def notify_admins(channel_data, message, error_type=None, error_details=None, parse_mode=None):
     """Отправляет уведомление админам канала"""
@@ -795,6 +979,194 @@ def get_bot():
     return bot
 
 set_bot_getter(get_bot)
+
+# Добавляем обработчик для KPI статистики
+@dp.message(Command("kpi"))
+@dp.message(Text(text="📊 Статистика KPI"))
+async def kpi_stats_command(message: types.Message):
+    """Показывает KPI статистику по каналам"""
+    try:
+        stats_text = "📊 KPI Статистика каналов:\n\n"
+        
+        for chat_id, data in channels.items():
+            try:
+                channel_info = await bot.get_chat(chat_id)
+                
+                # Получаем статистику из истории
+                channel_posts = {k: v for k, v in history.items() if k.startswith(f"{chat_id}_")}
+                total_posts = len(channel_posts)
+                failed_posts = len([k for k, v in channel_posts.items() 
+                                  if v.get("has_errors", False)])
+                
+                # Вычисляем процент успешных постов
+                success_rate = ((total_posts - failed_posts) / total_posts * 100 
+                              if total_posts > 0 else 0)
+                
+                stats_text += (
+                    f"📌 {channel_info.title}\n"
+                    f"Всего постов: {total_posts}\n"
+                    f"Успешных: {total_posts - failed_posts}\n"
+                    f"Процент успеха: {success_rate:.1f}%\n\n"
+                )
+                
+            except Exception as e:
+                logger.error(f"Ошибка при получении статистики канала {chat_id}: {e}")
+                stats_text += f"❌ Ошибка получения статистики для канала {chat_id}\n\n"
+        
+        await message.reply(stats_text)
+        
+    except Exception as e:
+        error_message = f"Ошибка при формировании статистики: {e}"
+        logger.error(error_message)
+        await message.reply(error_message)
+
+# Добавляем обработчик для настройки метрик
+@dp.callback_query(lambda c: c.data and c.data.startswith("metrics_settings:"))
+async def metrics_settings(callback_query: types.CallbackQuery):
+    try:
+        channel_id = callback_query.data.split(":")[1]
+        channel_data = channels[channel_id]
+        metrics = channel_data.get('metrics', {
+            'views_percent': CONFIG['POST_SETTINGS']['MIN_VIEWS_PERCENT'],
+            'reactions_percent': CONFIG['POST_SETTINGS']['MIN_REACTIONS_PERCENT'],
+            'forwards_percent': CONFIG['POST_SETTINGS']['MIN_FORWARDS_PERCENT']
+        })
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"👁 Просмотры: {metrics['views_percent']}%",
+                callback_data=f"set_metric:views:{channel_id}"
+            )],
+            [InlineKeyboardButton(
+                text=f"👍 Реакции: {metrics['reactions_percent']}%",
+                callback_data=f"set_metric:reactions:{channel_id}"
+            )],
+            [InlineKeyboardButton(
+                text=f"↗️ Пересылки: {metrics['forwards_percent']}%",
+                callback_data=f"set_metric:forwards:{channel_id}"
+            )],
+            [InlineKeyboardButton(
+                text="🔄 Сбросить к значениям по умолчанию",
+                callback_data=f"reset_metrics:{channel_id}"
+            )],
+            [InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"manage_channel:{channel_id}"
+            )]
+        ])
+
+        await callback_query.message.edit_text(
+            f"📊 Настройка метрик для канала {channel_id}\n\n"
+            f"Текущие значения:\n"
+            f"👁 Просмотры: {metrics['views_percent']}% от подписчиков\n"
+            f"👍 Реакции: {metrics['reactions_percent']}% от просмотров\n"
+            f"↗️ Пересылки: {metrics['forwards_percent']}% от просмотров\n\n"
+            "Нажмите на метрику для изменения",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при настройке метрик: {e}", exc_info=True)
+        await callback_query.answer("Произошла ошибка при настройке метрик", show_alert=True)
+
+# Обработчик для установки конкретной метрики
+@dp.callback_query(lambda c: c.data and c.data.startswith("set_metric:"))
+async def set_metric_value(callback_query: types.CallbackQuery):
+    try:
+        _, metric_type, channel_id = callback_query.data.split(":")
+        
+        # Создаем кнопки с процентами
+        percents = [5, 10, 15, 20, 25, 30, 40, 50]
+        buttons = []
+        row = []
+        
+        for percent in percents:
+            row.append(InlineKeyboardButton(
+                text=f"{percent}%",
+                callback_data=f"apply_metric:{metric_type}:{channel_id}:{percent}"
+            ))
+            if len(row) == 4:  # По 4 кнопки в ряду
+                buttons.append(row)
+                row = []
+        
+        if row:  # Добавляем оставшиеся кнопки
+            buttons.append(row)
+            
+        # Добавляем кнопку "Назад"
+        buttons.append([InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"metrics_settings:{channel_id}"
+        )])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        metric_names = {
+            'views': 'просмотров',
+            'reactions': 'реакций',
+            'forwards': 'пересылок'
+        }
+        
+        await callback_query.message.edit_text(
+            f"Выберите процент для {metric_names[metric_type]}:",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при установке значения метрики: {e}", exc_info=True)
+        await callback_query.answer("Произошла ошибка", show_alert=True)
+
+# Обработчик для применения выбранного значения метрики
+@dp.callback_query(lambda c: c.data and c.data.startswith("apply_metric:"))
+async def apply_metric_value(callback_query: types.CallbackQuery):
+    try:
+        _, metric_type, channel_id, percent = callback_query.data.split(":")
+        percent = float(percent)
+        
+        # Инициализируем метрики, если их нет
+        if 'metrics' not in channels[channel_id]:
+            channels[channel_id]['metrics'] = {
+                'views_percent': CONFIG['POST_SETTINGS']['MIN_VIEWS_PERCENT'],
+                'reactions_percent': CONFIG['POST_SETTINGS']['MIN_REACTIONS_PERCENT'],
+                'forwards_percent': CONFIG['POST_SETTINGS']['MIN_FORWARDS_PERCENT']
+            }
+        
+        # Обновляем значение метрики
+        metric_mapping = {
+            'views': 'views_percent',
+            'reactions': 'reactions_percent',
+            'forwards': 'forwards_percent'
+        }
+        
+        channels[channel_id]['metrics'][metric_mapping[metric_type]] = percent
+        save_channels()
+        
+        await callback_query.answer(f"Значение установлено: {percent}%")
+        # Возвращаемся к настройкам метрик
+        await metrics_settings(callback_query)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при применении значения метрики: {e}", exc_info=True)
+        await callback_query.answer("Произошла ошибка", show_alert=True)
+
+# Обработчик для сброса метрик к значениям по умолчанию
+@dp.callback_query(lambda c: c.data and c.data.startswith("reset_metrics:"))
+async def reset_metrics(callback_query: types.CallbackQuery):
+    try:
+        channel_id = callback_query.data.split(":")[1]
+        
+        # Сбрасываем к значениям по умолчанию
+        channels[channel_id]['metrics'] = {
+            'views_percent': CONFIG['POST_SETTINGS']['MIN_VIEWS_PERCENT'],
+            'reactions_percent': CONFIG['POST_SETTINGS']['MIN_REACTIONS_PERCENT'],
+            'forwards_percent': CONFIG['POST_SETTINGS']['MIN_FORWARDS_PERCENT']
+        }
+        save_channels()
+        
+        await callback_query.answer("Метрики сброшены к значениям по умолчанию")
+        # Возвращаемся к настройкам метрик
+        await metrics_settings(callback_query)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при сбросе метрик: {e}", exc_info=True)
+        await callback_query.answer("Произошла ошибка при сбросе метрик", show_alert=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
