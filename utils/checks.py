@@ -32,48 +32,39 @@ async def check_spelling(text: str, api_key: str) -> dict:
         # Проверяем входные данные
         if not text or not text.strip():
             return {
-                "has_errors": True,
-                "errors": "Пустой текст",
+                "has_errors": False,
+                "errors": "",
                 "categories": {
                     "spelling": False,
                     "grammar": False,
                     "spam": False,
-                    "readability": {"score": 0, "level": "легкий"}
+                    "readability": {"score": 7, "level": "средний"}
                 },
                 "details": {
                     "spelling_details": "",
                     "grammar_details": "",
                     "spam_details": "",
-                    "readability_details": "Текст отсутствует"
+                    "readability_details": ""
                 }
             }
             
-        # Ограничиваем длину текста для API
-        if len(text) > 12000:  # примерно 4000 токенов
-            text = text[:12000] + "..."
-            logger.warning("Текст был обрезан до 12000 символов для API запроса")
-
         client = OpenAI(api_key=api_key)
         system_prompt = """Вы - профессиональный редактор и модератор контента. 
         Проанализируйте текст по следующим критериям:
         
         1. Орфографические и грамматические ошибки
-           - Проверьте правописание слов
-           - Проверьте пунктуацию
-           - Проверьте согласование слов
-           - Укажите конкретные ошибки и правильные варианты
+           - Проверяйте только явные ошибки
+           - Игнорируйте профессиональные термины и специфические слова
+           - Не считайте ошибкой стилистические особенности
            
-        2. Спам и повторы
-           - Повторяющиеся фразы или абзацы
-           - Бессмысленные повторы текста
-           - Копипаста одного и того же содержания
-           
-        3. Читабельность текста (по шкале от 1 до 10)
-           - Оцените сложность восприятия текста
-           - Проверьте структуру предложений
-           - Оцените логичность изложения
-           - Проанализируйте длину предложений
-           - Оцените использование профессиональных терминов
+        2. Читабельность текста (по шкале от 1 до 10)
+           - Будьте менее строгими в оценке
+           - Учитывайте специфику профессиональных текстов
+           - Не занижайте оценку за использование терминологии
+        
+        Отмечайте текст как проблемный, только если есть серьезные нарушения.
+        Не отмечайте мелкие стилистические особенности как ошибки.
+        Игнорируйте проверку на спам и рекламу.
         
         Ответ предоставьте в формате JSON:
         {
@@ -82,7 +73,7 @@ async def check_spelling(text: str, api_key: str) -> dict:
             "categories": {
                 "spelling": boolean,  // орфография
                 "grammar": boolean,   // грамматические ошибки
-                "spam": boolean,      // спам и повторы
+                "spam": false,      // всегда false
                 "readability": {
                     "score": number,  // оценка от 1 до 10
                     "level": string   // "легкий"/"средний"/"сложный"
@@ -91,7 +82,7 @@ async def check_spelling(text: str, api_key: str) -> dict:
             "details": {
                 "spelling_details": "найденные орфографические ошибки с исправлениями",
                 "grammar_details": "найденные грамматические ошибки с исправлениями",
-                "spam_details": "описание найденных повторов",
+                "spam_details": "",  // всегда пустая строка
                 "readability_details": "подробный анализ читабельности текста"
             }
         }"""
@@ -114,21 +105,9 @@ async def check_spelling(text: str, api_key: str) -> dict:
             
             parsed_result = json.loads(result.strip())
             
-            # Формируем понятное описание проблем
-            if parsed_result["has_errors"]:
-                error_details = []
-                if parsed_result["categories"]["spelling"]:
-                    error_details.append("- Орфографические ошибки")
-                if parsed_result["categories"]["grammar"]:
-                    error_details.append("- Грамматические ошибки")
-                if parsed_result["categories"]["spam"]:
-                    error_details.append("- Спам и повторы")
-                
-                readability = parsed_result["categories"]["readability"]
-                if readability["score"] < 5:
-                    error_details.append(f"- Низкая читабельность текста (оценка: {readability['score']}/10)")
-                
-                parsed_result["errors"] = "\n".join(error_details)
+            # Принудительно устанавливаем spam в False
+            parsed_result["categories"]["spam"] = False
+            parsed_result["details"]["spam_details"] = ""
             
             return parsed_result
             
@@ -136,14 +115,14 @@ async def check_spelling(text: str, api_key: str) -> dict:
             logger.error(f"Ошибка парсинга JSON ответа: {result}")
             logger.error(f"Детали ошибки: {str(e)}")
             return {
-                "has_errors": True,
-                "errors": "Ошибка обработки ответа от OpenAI",
+                "has_errors": False,
+                "errors": "",
                 "categories": {
                     "spelling": False,
                     "grammar": False,
                     "spam": False,
                     "readability": {
-                        "score": 5,
+                        "score": 7,
                         "level": "средний"
                     }
                 },
@@ -151,7 +130,7 @@ async def check_spelling(text: str, api_key: str) -> dict:
                     "spelling_details": "",
                     "grammar_details": "",
                     "spam_details": "",
-                    "readability_details": "Ошибка при анализе текста"
+                    "readability_details": ""
                 }
             }
             
@@ -159,15 +138,21 @@ async def check_spelling(text: str, api_key: str) -> dict:
         logger.error(f"Ошибка при проверке текста: {e}", exc_info=True)
         return {
             "has_errors": False,
-            "errors": f"Ошибка проверки: {str(e)}",
+            "errors": "",
             "categories": {
                 "spelling": False,
                 "grammar": False,
                 "spam": False,
                 "readability": {
-                    "score": 5,
+                    "score": 7,
                     "level": "средний"
                 }
+            },
+            "details": {
+                "spelling_details": "",
+                "grammar_details": "",
+                "spam_details": "",
+                "readability_details": ""
             }
         }
 
@@ -426,7 +411,7 @@ async def check_post_metrics_later(client, bot, chat_id: int, message_id: int,
         logger.info(f"Запуск отложенной проверки метрик для поста {message_id} в канале {chat_id}")
         
         # Ждем указанное время (для тестов 30 секунд, в проде 24 часа)
-        await asyncio.sleep(30)
+        await asyncio.sleep(86400)
         
         # Получаем метрики
         metrics = await get_post_metrics(client, chat_id, message_id)

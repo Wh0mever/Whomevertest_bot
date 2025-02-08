@@ -28,7 +28,7 @@ CONFIG.update({
     "METRICS_CHECK_DELAY": 86400,  # 24 часа
     "TEXT_CHECK_DELAY": 0,  # Мгновенная проверка
     "POST_SETTINGS": {
-        "MAX_LENGTH": 2000  # Максимальная длина текста
+        "MAX_LENGTH": 4000  # Максимальная длина текста
     }
 })
 
@@ -469,35 +469,36 @@ async def handle_channel_post(message: types.Message):
             # Проверка орфографии и содержания
             spelling_result = await check_spelling(message.text, CONFIG["OPENAI_API_KEY"])
             
-            # Формируем сообщение с деталями проверки
-            error_message = f"📝 Результаты проверки поста:\n\n"
-            error_message += f"📌 Канал: {channel_data.get('title', chat_id)}\n"
-            error_message += f"🔢 ID поста: {message.message_id}\n"
-            error_message += f"🔗 Ссылка: https://t.me/c/{str(chat_id)[4:]}/{message.message_id}\n\n"
-            error_message += f"📄 Текст поста:\n{message.text[:200]}{'...' if len(message.text) > 200 else ''}\n\n"
-            
-            if spelling_result["has_errors"]:
-                error_message += "❌ Найдены проблемы в тексте:\n\n"
-                if spelling_result["categories"]["spelling"]:
-                    error_message += f"🔍 Орфография:\n{spelling_result['details']['spelling_details']}\n\n"
-                if spelling_result["categories"]["grammar"]:
-                    error_message += f"📝 Грамматика:\n{spelling_result['details']['grammar_details']}\n\n"
-                if spelling_result["categories"]["spam"]:
-                    error_message += f"⚠️ Спам:\n{spelling_result['details']['spam_details']}\n\n"
+            # Формируем сообщение с деталями проверки только если есть серьезные проблемы
+            if spelling_result["has_errors"] or spelling_result["categories"]["readability"]["score"] < 5:
+                error_message = f"📝 Результаты проверки поста:\n\n"
+                error_message += f"📌 Канал: {channel_data.get('title', chat_id)}\n"
+                error_message += f"🔢 ID поста: {message.message_id}\n"
+                error_message += f"🔗 Ссылка: https://t.me/c/{str(chat_id)[4:]}/{message.message_id}\n\n"
+                
+                has_serious_issues = False
+                
+                if spelling_result["has_errors"]:
+                    if spelling_result["categories"]["spelling"]:
+                        error_message += f"🔍 Орфография:\n{spelling_result['details']['spelling_details']}\n\n"
+                        has_serious_issues = True
+                    if spelling_result["categories"]["grammar"]:
+                        error_message += f"📝 Грамматика:\n{spelling_result['details']['grammar_details']}\n\n"
+                        has_serious_issues = True
                 
                 readability = spelling_result["categories"]["readability"]
-                error_message += (
-                    f"📚 Читабельность: {readability['score']}/10\n"
-                    f"Уровень: {readability['level']}\n"
-                    f"{spelling_result['details']['readability_details']}"
-                )
+                if readability["score"] < 5:  # Отправляем уведомление только если оценка < 5
+                    error_message += (
+                        f"📚 Читабельность: {readability['score']}/10\n"
+                        f"Уровень: {readability['level']}\n"
+                        f"{spelling_result['details']['readability_details']}"
+                    )
+                    has_serious_issues = True
                 
-                await notify_admins(channel_data, error_message, message)
-                return
-            elif spelling_result["categories"]["readability"]["score"] < 7:
-                # Отправляем уведомление только если читабельность ниже 7
-                await notify_admins(channel_data, error_message, message)
-                return
+                # Отправляем уведомление только если есть серьезные проблемы
+                if has_serious_issues:
+                    await notify_admins(channel_data, error_message, message)
+                    return
             
         # Запускаем отложенную проверку метрик
         logger.info("Запуск отложенной проверки метрик")
