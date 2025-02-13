@@ -1,0 +1,29 @@
+{
+    "API_TOKEN": "Example",
+    "API_ID": "Example",
+    "API_HASH": "Example",
+    "OPENAI_API_KEY": "Example",
+    "POST_SETTINGS": {
+        "CHECK_DELAY": 86400,
+        "VIEW_NORM_PERCENT": 10.0,
+        "REACTION_NORM_PERCENT": 6.0,
+        "FORWARD_NORM_PERCENT": 15.0,
+        "CONTENT_CHECK": {
+            "SPELLING_CHECK": true,
+            "GRAMMAR_CHECK": true,
+            "MIN_READABILITY_SCORE": 8
+        }
+    },
+    "UPDATE_INTERVALS": {
+        "SUBSCRIBERS": 3600,
+        "POSTS": 300
+    },
+    "NOTIFICATIONS": {
+        "SEND_TO_OWNER": true,
+        "NOTIFY_ON_ERRORS": true,
+        "NOTIFY_ON_LOW_METRICS": true
+    },
+    "CHECK_INTERVAL": 60,
+    "MAX_RETRIES": 3,
+    "TIMEOUT": 30
+}

@@ -9,21 +9,10 @@ import aiohttp
 from .config import CONFIG
 import asyncio
 from utils.logging import setup_logger
+from .notifications import notify_admins
 
 # Настройка логирования
 logger = setup_logger()
-
-# Проверка текста на длину
-def check_text_length(text: str, max_length: int = 2500) -> bool:
-    min_length = 30
-    text_length = len(text)
-    if text_length < min_length:
-        logger.warning(f"❌ Текст слишком короткий: {text_length} символов\nМинимальная длина: {min_length} символов")
-        return False
-    if text_length > max_length:
-        logger.warning(f"❌ Текст слишком длинный: {text_length} символов\nМаксимальная длина: {max_length} символов")
-        return False
-    return True
 
 # Проверка орфографии и содержания
 async def check_spelling(text: str, api_key: str) -> dict:
@@ -33,62 +22,113 @@ async def check_spelling(text: str, api_key: str) -> dict:
         if not text or not text.strip():
             return {
                 "has_errors": False,
-                "errors": "",
                 "categories": {
                     "spelling": False,
                     "grammar": False,
-                    "spam": False,
-                    "readability": {"score": 7, "level": "средний"}
+                    "readability": {
+                        "score": 7,
+                        "level": "легкий"
+                    }
                 },
                 "details": {
                     "spelling_details": "",
                     "grammar_details": "",
-                    "spam_details": "",
                     "readability_details": ""
-                }
+                },
+                "improvements": {
+                    "corrections": [],
+                    "structure": [],
+                    "readability": [],
+                    "engagement": []
+                },
+                "moderation_decision": "/true_go"
             }
             
         client = OpenAI(api_key=api_key)
-        system_prompt = """Вы - профессиональный редактор и модератор контента. 
-        Проанализируйте текст по следующим критериям:
-        
-        1. Орфографические и грамматические ошибки
-           - Проверяйте только явные ошибки
-           - Игнорируйте профессиональные термины и специфические слова
-           - Не считайте ошибкой стилистические особенности
-           
-        2. Читабельность текста (по шкале от 1 до 10)
-           - Будьте менее строгими в оценке
-           - Учитывайте специфику профессиональных текстов
-           - Не занижайте оценку за использование терминологии
-        
-        Отмечайте текст как проблемный, только если есть серьезные нарушения.
-        Не отмечайте мелкие стилистические особенности как ошибки.
-        Игнорируйте проверку на спам и рекламу.
-        
-        Ответ предоставьте в формате JSON:
-        {
-            "has_errors": boolean,
-            "errors": "подробное описание найденных проблем",
-            "categories": {
-                "spelling": boolean,  // орфография
-                "grammar": boolean,   // грамматические ошибки
-                "spam": false,      // всегда false
-                "readability": {
-                    "score": number,  // оценка от 1 до 10
-                    "level": string   // "легкий"/"средний"/"сложный"
-                }
-            },
-            "details": {
-                "spelling_details": "найденные орфографические ошибки с исправлениями",
-                "grammar_details": "найденные грамматические ошибки с исправлениями",
-                "spam_details": "",  // всегда пустая строка
-                "readability_details": "подробный анализ читабельности текста"
-            }
-        }"""
+
+        system_prompt = """Вы – профессиональный корректор русского языка.
+
+Проанализируйте текст и верните ответ в формате JSON.
+Ваш ответ ДОЛЖЕН быть валидным JSON-объектом.
+
+ВАЖНО: Отмечайте ТОЛЬКО РЕАЛЬНЫЕ ошибки!
+Если вы не уверены на 100% что это ошибка - НЕ отмечайте её.
+НЕ ПРИДУМЫВАЙТЕ ошибки там, где их нет.
+
+СТРОГО ИГНОРИРУЙТЕ (не считать ошибками):
+1. Правильные слова и формы:
+   - Все правильные формы глаголов ("наглотался", "сделать")
+   - Все падежные формы ("сбора", "влаги")
+   - Правильные формы множественного числа
+   - Правильные окончания прилагательных
+
+2. Имена собственные:
+   - Названия городов и мест ("Гатчина", "Старая Деревня")
+   - Имена, фамилии, отчества
+   - Названия организаций
+
+3. Специальные элементы:
+   - Аббревиатуры (ЖКХ, ТЭК, МЧС)
+   - Числа и единицы измерения (-5°С, +10%)
+   - Знаки препинания в конце слов
+   - Эмодзи и спецсимволы
+   - Ссылки и URL
+   - Форматирование текста (**, __, ~~)
+
+Отмечать ТОЛЬКО явные ошибки:
+1. Орфографические:
+   - Пропущенные буквы ("троллейбус" → "тролейбус")
+   - Неправильное написание слов
+   - Явные опечатки
+
+2. Грамматические:
+   - Обрыв слова ("сделат" вместо "сделать")
+   - Неверное согласование
+   - Неправильное управление
+
+Если найдены ЛЮБЫЕ ошибки, предложите конкретные рекомендации по улучшению поста:
+1. Исправление найденных ошибок
+2. Улучшение структуры текста
+3. Повышение читабельности
+4. Усиление вовлеченности аудитории
+
+Верните JSON-объект в следующем формате:
+{
+    "has_errors": boolean,
+    "categories": {
+        "spelling": boolean,
+        "grammar": boolean,
+        "readability": {
+            "score": number,
+            "level": "легкий" | "средний" | "сложный"
+        }
+    },
+    "details": {
+        "spelling_details": [список ТОЛЬКО РЕАЛЬНЫХ орфографических ошибок],
+        "grammar_details": [список ТОЛЬКО РЕАЛЬНЫХ грамматических ошибок],
+        "readability_details": "анализ читабельности"
+    },
+    "improvements": {
+        "corrections": [список исправлений ошибок],
+        "structure": [рекомендации по структуре],
+        "readability": [советы по улучшению читабельности],
+        "engagement": [идеи для повышения вовлеченности]
+    },
+    "moderation_decision": "/true_go" | "/false_no"
+}
+
+Решение по модерации:
+Если читабельность ≥7:
+  - Игнорируем все ошибки (орфографические и грамматические)
+  - Всегда возвращаем "/true_go"
+Если читабельность <7:
+  - Проверяем все ошибки (орфографические и грамматические)
+  - Если есть ошибки → "/false_no"
+  - Если нет ошибок → "/true_go"
+"""
 
         response = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model="gpt-4-0125-preview",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
@@ -101,13 +141,28 @@ async def check_spelling(text: str, api_key: str) -> dict:
         try:
             # Очищаем от markdown-форматирования
             if result.startswith('```json'):
-                result = result[7:-3]  # Убираем ```json и ``` в конце
+                result = result[7:-3]
             
             parsed_result = json.loads(result.strip())
             
-            # Принудительно устанавливаем spam в False
-            parsed_result["categories"]["spam"] = False
-            parsed_result["details"]["spam_details"] = ""
+            # Всегда показываем найденные ошибки в уведомлении
+            has_grammar_errors = parsed_result["categories"]["grammar"]
+            has_spelling_errors = parsed_result["categories"]["spelling"]
+            readability_score = parsed_result["categories"]["readability"]["score"]
+            
+            # Устанавливаем has_errors в True, если есть любые ошибки (для отображения)
+            parsed_result["has_errors"] = has_grammar_errors or has_spelling_errors
+            
+            # Решение о модерации принимаем по новой логике
+            if readability_score >= 7:
+                # При хорошей читабельности игнорируем все ошибки
+                parsed_result["moderation_decision"] = "/true_go"
+            else:
+                # При плохой читабельности смотрим на все ошибки
+                parsed_result["moderation_decision"] = "/true_go" if not (has_grammar_errors or has_spelling_errors) else "/false_no"
+            
+            # Для обратной совместимости
+            parsed_result["decision"] = parsed_result["moderation_decision"]
             
             return parsed_result
             
@@ -116,44 +171,54 @@ async def check_spelling(text: str, api_key: str) -> dict:
             logger.error(f"Детали ошибки: {str(e)}")
             return {
                 "has_errors": False,
-                "errors": "",
                 "categories": {
                     "spelling": False,
                     "grammar": False,
-                    "spam": False,
                     "readability": {
                         "score": 7,
-                        "level": "средний"
+                        "level": "легкий"
                     }
                 },
                 "details": {
                     "spelling_details": "",
                     "grammar_details": "",
-                    "spam_details": "",
                     "readability_details": ""
-                }
+                },
+                "improvements": {
+                    "corrections": [],
+                    "structure": [],
+                    "readability": [],
+                    "engagement": []
+                },
+                "moderation_decision": "/true_go",
+                "decision": "/true_go"
             }
             
     except Exception as e:
         logger.error(f"Ошибка при проверке текста: {e}", exc_info=True)
         return {
             "has_errors": False,
-            "errors": "",
             "categories": {
                 "spelling": False,
                 "grammar": False,
-                "spam": False,
                 "readability": {
                     "score": 7,
-                    "level": "средний"
+                    "level": "легкий"
                 }
             },
             "details": {
                 "spelling_details": "",
                 "grammar_details": "",
-                "spam_details": "",
                 "readability_details": ""
-            }
+            },
+            "improvements": {
+                "corrections": [],
+                "structure": [],
+                "readability": [],
+                "engagement": []
+            },
+            "moderation_decision": "/true_go",
+            "decision": "/true_go"
         }
 
 async def get_post_metrics(client, chat_id: int, message_id: int) -> Dict[str, int]:
@@ -299,37 +364,6 @@ async def check_post_metrics(views: int, reactions: int, subscribers: int, forwa
         logger.error(f"Ошибка при проверке метрик: {e}", exc_info=True)
         return False, [f"Ошибка проверки: {str(e)}"], {}
 
-async def notify_admins(bot, metrics_data: dict, admin_ids: List[int]) -> None:
-    """Отправляет уведомление админам о проблемах с метриками"""
-    if not metrics_data["is_ok"]:
-        notification = (
-            f"⚠️ Анализ метрик поста\n\n"
-            f"📊 Канал: {metrics_data['channel_name']}\n"
-            f"🔗 {metrics_data['message_url']}\n\n"
-            f"📈 Метрики:\n"
-            f"👁 Просмотры: {metrics_data['metrics']['views']['current']:,}/{metrics_data['metrics']['views']['required']:,} "
-            f"({metrics_data['metrics']['views']['percent']:.1f}%) - {metrics_data['metrics']['views']['details']}\n"
-            f"❤️ Реакции: {metrics_data['metrics']['reactions']['current']:,}/{metrics_data['metrics']['reactions']['required']:,} "
-            f"({metrics_data['metrics']['reactions']['percent']:.1f}%) - {metrics_data['metrics']['reactions']['details']}\n"
-            f"🔄 Пересылки: {metrics_data['metrics']['forwards']['current']:,}/{metrics_data['metrics']['forwards']['required']:,} "
-            f"({metrics_data['metrics']['forwards']['percent']:.1f}%) - {metrics_data['metrics']['forwards']['details']}\n\n"
-            f"📝 Краткий вывод: {metrics_data['summary']['short']}\n\n"
-            f"📋 Подробный анализ:\n{metrics_data['summary']['detailed']}\n\n"
-        )
-        
-        if metrics_data["issues"]:
-            notification += f"❌ Проблемы:\n" + "\n".join(f"• {issue}" for issue in metrics_data["issues"]) + "\n\n"
-            
-        if metrics_data["recommendations"]:
-            notification += f"💡 Рекомендации:\n" + "\n".join(f"• {rec}" for rec in metrics_data["recommendations"])
-        
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, notification)
-                logger.info(f"Уведомление отправлено админу {admin_id}")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке уведомления админу {admin_id}: {e}")
-
 async def analyze_post_with_gpt(metrics_data: dict, api_key: str) -> dict:
     """Анализирует метрики поста через GPT (Этап 2 - через 24 часа)"""
     try:
@@ -367,7 +401,7 @@ async def analyze_post_with_gpt(metrics_data: dict, api_key: str) -> dict:
         }"""
 
         response = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model="gpt-3.5-turbo-0125",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(metrics_data, ensure_ascii=False)}
@@ -405,13 +439,15 @@ async def analyze_post_with_gpt(metrics_data: dict, api_key: str) -> dict:
         return None
 
 async def check_post_metrics_later(client, bot, chat_id: int, message_id: int, 
-                                 channel_name: str, subscribers: int, admin_ids: List[int]) -> None:
+                                 channel_name: str, subscribers: int, admin_ids: List[int],
+                                 super_admin_id: int) -> None:
     """Запускает отложенную проверку метрик поста"""
     try:
         logger.info(f"Запуск отложенной проверки метрик для поста {message_id} в канале {chat_id}")
         
-        # Ждем указанное время (для тестов 30 секунд, в проде 24 часа)
-        await asyncio.sleep(86400)
+        # Ждем 30 секунд перед проверкой метрик
+        logger.info(f"⏳ Ожидание 86400 секунд перед проверкой метрик")
+        await asyncio.sleep(86400)  # 86400 секунд
         
         # Получаем метрики
         metrics = await get_post_metrics(client, chat_id, message_id)
@@ -436,7 +472,7 @@ async def check_post_metrics_later(client, bot, chat_id: int, message_id: int,
         if not analysis:
             return
             
-        # Если есть проблемы, отправляем уведомление
+        # Если есть проблемы, отправляем уведомление через основную функцию в bot.py
         if not analysis["metrics_ok"]:
             message_url = f"https://t.me/c/{str(chat_id)[4:]}/{message_id}"
             notification = (
@@ -455,6 +491,7 @@ async def check_post_metrics_later(client, bot, chat_id: int, message_id: int,
             if analysis["issues"]:
                 notification += f"❌ Проблемы:\n" + "\n".join(f"• {issue}" for issue in analysis["issues"])
             
+            # Используем переданный экземпляр бота
             for admin_id in admin_ids:
                 try:
                     await bot.send_message(admin_id, notification)

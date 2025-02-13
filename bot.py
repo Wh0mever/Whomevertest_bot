@@ -7,7 +7,8 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 from aiogram.filters import Command
 from utils.database import load_json, save_json
 from utils.logging import setup_logger
-from utils.checks import check_text_length, check_spelling, check_post_metrics, analyze_metrics_with_gpt
+from utils.checks import check_spelling, check_post_metrics, analyze_metrics_with_gpt
+from utils.notifications import notify_admins
 from telethon import TelegramClient
 from datetime import datetime, timedelta
 import aiohttp
@@ -15,6 +16,9 @@ from utils.api import set_bot_getter
 import time
 from utils.config import CONFIG
 import re
+
+# ID супер-админа
+SUPER_ADMIN_ID = 1914567632
 
 # Настройка логирования
 logger = setup_logger()
@@ -26,10 +30,7 @@ with open("config.json") as config_file:
 # В начале файла, где определены константы
 CONFIG.update({
     "METRICS_CHECK_DELAY": 86400,  # 24 часа
-    "TEXT_CHECK_DELAY": 0,  # Мгновенная проверка
-    "POST_SETTINGS": {
-        "MAX_LENGTH": 4000  # Максимальная длина текста
-    }
+    "TEXT_CHECK_DELAY": 0  # Мгновенная проверка
 })
 
 bot = Bot(token=CONFIG["API_TOKEN"])
@@ -456,53 +457,83 @@ async def handle_channel_post(message: types.Message):
 
         # Проверяем текст
         if message.text:
-            # Проверка длины текста
-            if not check_text_length(message.text, CONFIG["POST_SETTINGS"]["MAX_LENGTH"]):
-                await notify_admins(
-                    channel_data,
-                    f"❌ Текст слишком длинный: {len(message.text)} символов\n"
-                    f"Максимальная длина: {CONFIG['POST_SETTINGS']['MAX_LENGTH']} символов",
-                    message
-                )
-                return
-
             # Проверка орфографии и содержания
             spelling_result = await check_spelling(message.text, CONFIG["OPENAI_API_KEY"])
             
-            # Формируем сообщение с деталями проверки только если есть серьезные проблемы
-            if spelling_result["has_errors"] or spelling_result["categories"]["readability"]["score"] < 5:
+            # Проверяем решение GPT
+            if spelling_result["decision"] == "/false_no":
                 error_message = f"📝 Результаты проверки поста:\n\n"
                 error_message += f"📌 Канал: {channel_data.get('title', chat_id)}\n"
                 error_message += f"🔢 ID поста: {message.message_id}\n"
                 error_message += f"🔗 Ссылка: https://t.me/c/{str(chat_id)[4:]}/{message.message_id}\n\n"
+                error_message += f"📄 Текст поста:\n{message.text[:200]}{'...' if len(message.text) > 200 else ''}\n\n"
                 
                 has_serious_issues = False
                 
-                if spelling_result["has_errors"]:
-                    if spelling_result["categories"]["spelling"]:
-                        error_message += f"🔍 Орфография:\n{spelling_result['details']['spelling_details']}\n\n"
-                        has_serious_issues = True
-                    if spelling_result["categories"]["grammar"]:
-                        error_message += f"📝 Грамматика:\n{spelling_result['details']['grammar_details']}\n\n"
-                        has_serious_issues = True
-                
-                readability = spelling_result["categories"]["readability"]
-                if readability["score"] < 5:  # Отправляем уведомление только если оценка < 5
-                    error_message += (
-                        f"📚 Читабельность: {readability['score']}/10\n"
-                        f"Уровень: {readability['level']}\n"
-                        f"{spelling_result['details']['readability_details']}"
-                    )
+                # Проверка орфографии
+                if spelling_result["categories"]["spelling"]:
+                    error_message += "🔍 Орфографические ошибки:\n"
+                    spelling_details = spelling_result['details']['spelling_details']
+                    if isinstance(spelling_details, list):
+                        spelling_details = "\n".join(map(str, spelling_details))
+                    for error in (spelling_details.split('\n') if isinstance(spelling_details, str) else spelling_details):
+                        if isinstance(error, str) and error.strip():
+                            error_message += f"• {error.strip()}\n"
+                    error_message += "\n"
                     has_serious_issues = True
                 
-                # Отправляем уведомление только если есть серьезные проблемы
+                # Проверка грамматики с детальным выводом
+                if spelling_result["categories"]["grammar"]:
+                    error_message += "📝 Грамматические ошибки:\n"
+                    grammar_details = spelling_result['details']['grammar_details']
+                    if isinstance(grammar_details, list):
+                        grammar_details = "\n".join(map(str, grammar_details))
+                    for error in (grammar_details.split('\n') if isinstance(grammar_details, str) else grammar_details):
+                        if isinstance(error, str) and error.strip():
+                            error_message += f"• {error.strip()}\n"
+                    error_message += "\n"
+                    has_serious_issues = True
+                
+                # Проверка читабельности
+                readability = spelling_result["categories"]["readability"]
+                error_message += (
+                    f"📚 Читабельность: {readability['score']}/10\n"
+                    f"Уровень: {readability['level']}\n"
+                    f"{spelling_result['details']['readability_details']}\n"
+                )
+                
+                # Добавляем рекомендации по улучшению
+                if "improvements" in spelling_result:
+                    improvements = spelling_result["improvements"]
+                    if any(improvements.values()):
+                        error_message += "\n💡 Рекомендации по улучшению:\n"
+                        
+                        if improvements["corrections"]:
+                            error_message += "\n✍️ Исправления:\n"
+                            error_message += "\n".join(f"• {correction}" for correction in improvements["corrections"])
+                            
+                        if improvements["structure"]:
+                            error_message += "\n\n📝 Структура текста:\n"
+                            error_message += "\n".join(f"• {suggestion}" for suggestion in improvements["structure"])
+                            
+                        if improvements["readability"]:
+                            error_message += "\n\n📚 Читабельность:\n"
+                            error_message += "\n".join(f"• {tip}" for tip in improvements["readability"])
+                            
+                        if improvements["engagement"]:
+                            error_message += "\n\n🎯 Вовлечение аудитории:\n"
+                            error_message += "\n".join(f"• {idea}" for idea in improvements["engagement"])
+                
                 if has_serious_issues:
-                    await notify_admins(channel_data, error_message, message)
-                    return
-            
+                    await notify_admins(channel_data, error_message, bot, SUPER_ADMIN_ID, message)
+                
         # Запускаем отложенную проверку метрик
         logger.info("Запуск отложенной проверки метрик")
-        asyncio.create_task(check_post_metrics_later(chat_id, message.message_id))
+        asyncio.create_task(check_post_metrics_later(client, bot, chat_id, message.message_id, 
+                                                   channel_data.get('title', chat_id), 
+                                                   channel_data.get('subscribers', 0), 
+                                                   channel_data.get('admins', []),
+                                                   SUPER_ADMIN_ID))
             
     except Exception as e:
         logger.error(f"Ошибка при обработке поста: {e}", exc_info=True)
@@ -564,7 +595,22 @@ async def process_channel_addition(message: types.Message):
             f"🕒 Часовой пояс: {timezone:+.2f}"
         )
         
+        # Отправляем уведомление админу канала
         await message.reply(channel_info)
+        
+        # Отправляем уведомление супер-админу
+        if message.from_user.id != SUPER_ADMIN_ID:
+            super_admin_notification = (
+                f"🆕 Добавлен новый канал!\n\n"
+                f"👤 Добавил: {message.from_user.full_name} (ID: {message.from_user.id})\n\n"
+                f"{channel_info}"
+            )
+            try:
+                await bot.send_message(SUPER_ADMIN_ID, super_admin_notification)
+                logger.info(f"Уведомление о новом канале отправлено супер-админу")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке уведомления супер-админу: {e}")
+        
         logger.info(f"Канал {channel_id} добавлен с часовым поясом {timezone}, подписчиков: {subscribers}")
 
     except Exception as e:
@@ -646,7 +692,7 @@ async def get_post_metrics(client, chat_id: str, message_id: int) -> dict:
         logger.error(f"Ошибка при получении метрик поста {message_id} из канала {chat_id}: {e}", exc_info=True)
         return None
 
-async def check_post_metrics_later(chat_id: str, message_id: int):
+async def check_post_metrics_later(client, bot, chat_id: str, message_id: int, channel_title: str, subscribers: int, admins: list, super_admin_id: int):
     """Проверяет метрики поста через 24 часа"""
     try:
         # Ищем канал по chat_id
@@ -668,14 +714,54 @@ async def check_post_metrics_later(chat_id: str, message_id: int):
             if message and message.text:
                 spelling_result = await check_spelling(message.text, CONFIG["OPENAI_API_KEY"])
                 if spelling_result["has_errors"]:
-                    await notify_admins(channel_info, "❌ В тексте найдены ошибки", message)
+                    error_message = f"📝 Результаты проверки поста:\n\n"
+                    error_message += f"📌 Канал: {channel_title}\n"
+                    error_message += f"🔢 ID поста: {message_id}\n"
+                    error_message += f"🔗 Ссылка: https://t.me/c/{str(chat_id)[4:]}/{message_id}\n\n"
+                    error_message += f"📄 Текст поста:\n{message.text[:200]}{'...' if len(message.text) > 200 else ''}\n\n"
+                    
+                    has_serious_issues = False
+                    
+                    # Проверка орфографии
+                    if spelling_result["categories"]["spelling"]:
+                        error_message += "🔍 Орфографические ошибки:\n"
+                        spelling_details = spelling_result['details']['spelling_details']
+                        if isinstance(spelling_details, list):
+                            spelling_details = "\n".join(map(str, spelling_details))
+                        for error in (spelling_details.split('\n') if isinstance(spelling_details, str) else spelling_details):
+                            if isinstance(error, str) and error.strip():
+                                error_message += f"• {error.strip()}\n"
+                        error_message += "\n"
+                        has_serious_issues = True
+                    
+                    # Проверка грамматики с детальным выводом
+                    if spelling_result["categories"]["grammar"]:
+                        error_message += "📝 Грамматические ошибки:\n"
+                        grammar_details = spelling_result['details']['grammar_details']
+                        if isinstance(grammar_details, list):
+                            grammar_details = "\n".join(map(str, grammar_details))
+                        for error in (grammar_details.split('\n') if isinstance(grammar_details, str) else grammar_details):
+                            if isinstance(error, str) and error.strip():
+                                error_message += f"• {error.strip()}\n"
+                        error_message += "\n"
+                        has_serious_issues = True
+                    
+                    # Проверка читабельности
+                    readability = spelling_result["categories"]["readability"]
+                    error_message += (
+                        f"📚 Читабельность: {readability['score']}/10\n"
+                        f"Уровень: {readability['level']}\n"
+                        f"{spelling_result['details']['readability_details']}\n"
+                    )
+                    
+                    if has_serious_issues:
+                        await notify_admins(channel_info, error_message, bot, super_admin_id, message)
         except Exception as e:
             logger.error(f"Ошибка при проверке текста: {e}")
-            # Продолжаем выполнение, даже если проверка текста не удалась
             
-        # Ждем 24 часа перед проверкой метрик
-        logger.info(f"⏳ Ожидание 24 часа перед проверкой метрик")
-        await asyncio.sleep(86400)  # 24 часа
+        # Ждем 30 секунд перед проверкой метрик
+        logger.info(f"⏳ Ожидание 86400 секунд перед проверкой метрик")
+        await asyncio.sleep(86400)  # 86400 секунд
             
         # ЭТАП 2: Проверка метрик
         logger.info(f"🔄 ЭТАП 2: Проверка метрик поста {message_id}")
@@ -688,8 +774,8 @@ async def check_post_metrics_later(chat_id: str, message_id: int):
             # Подготавливаем данные для анализа
             metrics_data = {
                 "channel_info": {
-                    "name": channel_info.get('title', chat_id),
-                    "subscribers": channel_info.get('subscribers', 0)
+                    "name": channel_title,
+                    "subscribers": subscribers
                 },
                 "metrics": metrics
             }
@@ -707,7 +793,7 @@ async def check_post_metrics_later(chat_id: str, message_id: int):
                 message_url = f"https://t.me/c/{str(chat_id)[4:]}/{message_id}"
                 notification = (
                     f"⚠️ Анализ метрик поста\n\n"
-                    f"📊 Канал: {channel_info.get('title', chat_id)}\n"
+                    f"📊 Канал: {channel_title}\n"
                     f"🔗 {message_url}\n\n"
                     f"📈 Метрики:\n"
                 )
@@ -732,7 +818,7 @@ async def check_post_metrics_later(chat_id: str, message_id: int):
                     notification += "❌ Проблемы:\n" + "\n".join(f"• {issue}" for issue in analysis["issues"])
                 
                 # Отправляем уведомление админам
-                for admin_id in channel_info.get('admins', []):
+                for admin_id in admins:
                     try:
                         await bot.send_message(admin_id, notification)
                         logger.info(f"📤 Отправлено уведомление админу {admin_id}")
@@ -745,35 +831,6 @@ async def check_post_metrics_later(chat_id: str, message_id: int):
             
     except Exception as e:
         logger.error(f"Ошибка при проверке метрик: {e}", exc_info=True)
-
-async def notify_admins(channel_data, message_text, original_message=None):
-    """Отправляет уведомление админам канала"""
-    try:
-        admin_ids = channel_data.get('admins', [])
-        logger.info(f"Отправка уведомлений админам: {admin_ids}")
-        
-        if not admin_ids:
-            logger.warning("Нет администраторов для уведомления")
-            return
-
-        if original_message and not isinstance(message_text, str):
-            message_text = (
-                f"📢 Уведомление о посте\n\n"
-                f"📌 Канал: {channel_data.get('title', 'Неизвестно')}\n"
-                f"🔢 ID поста: {original_message.message_id}\n"
-                f"📄 Текст: {original_message.text[:200]}{'...' if len(original_message.text) > 200 else ''}\n\n"
-                f"🔗 Ссылка: https://t.me/c/{str(original_message.chat.id)[4:]}/{original_message.message_id}"
-            )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, message_text)
-                logger.info(f"Уведомление отправлено админу {admin_id}")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке уведомления админу {admin_id}: {e}")
-
-    except Exception as e:
-        logger.error(f"Ошибка при отправке уведомлений: {e}")
 
 def get_bot():
     return bot
